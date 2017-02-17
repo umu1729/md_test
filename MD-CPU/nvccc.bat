@@ -1,0 +1,1 @@
+nvcc %* -Xcompiler "/wd 4819"
