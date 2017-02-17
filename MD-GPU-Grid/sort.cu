@@ -14,14 +14,22 @@ __global__ void bitonicSort_Global(int *dep,int *tar,int i,int j){
     int rig = (idx >> j)&0x1; //left or right (buffer pointer) flag;
     int sel = dep[idx];
     int opp = dep[jdx];
-    int mi = min(sel,opp);
-    int ma = max(sel,opp);
-    tar[idx] = ((dec ^ rig) == 1)?ma:mi;  
+    bool ima = opp < sel; //AM I MAX;
+    bool ins = ((dec ^ rig) == ima); // is it NOT need to swap memory(idx<-->idy)
+    
+    //int mi = min(sel,opp);
+    //int ma = max(sel,opp);
+    //tar[idx] = ((dec ^ rig) == 1)?ma:mi;  // this code can't be extend to hash sorting;
+    tar[idx] = ins?sel:opp;
 }
 
-__global__ void bitonicSort_Local1(){
+__global__ void bitonicSort_Local1(int *dep,int *tar,int i,int j){
     extern __shared__ int sbuf [];
-    //int idx = threadIdx.x + 
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int itx = threadIdx.x;
+    
+    sbuf[itx] = dep[idx];
+    __syncthreads();
 }
 
 void initRand(){
