@@ -1,18 +1,14 @@
+#pragma once
 #include <stdio.h>
 #include <time.h>
 #include "cuHeader.h"
 #include <math.h>
 #include <cuda_runtime.h>
+#include "sortlib.h"
 
 void initRand(){
     time_t t;
     srand((unsigned) time(&t));
-}
-
-void initData(float *ip,int size){
-    for (int i=0;i<size;i++){
-        ip[i] = (float)( rand() & 0xFF )/256*10;
-    }
 }
 
 /// using malloced nElem*3*sizeof(float) buffer,write uniform particles postiion.
@@ -223,6 +219,9 @@ __global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float 
     d_fz[i]=t_fz;
 }
 
+__global void HashFromPosition(){
+}
+
 
 void cuMain(void (*grpc)(V3Buf buf) ){
     initRand();
@@ -266,6 +265,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         //Graphics Functon(External) :transfer postion buffer to graphics function;
         if (it%1==0) (*grpc)(h_v3pos);
         
+        //Position Update
         for (int i=0;i<nElem*3;i++){
             float p = h_p[i];
             p+=dt*(h_v[i]+0.5f*dt*h_f[i]);
@@ -273,7 +273,21 @@ void cuMain(void (*grpc)(V3Buf buf) ){
             h_p[i] = p;
         }
         
+        //Force buffer becomes old because of position updated.
         SwapFloatPointer(&h_f,&h_fd);
+        
+        //Kernel:Hashing (Generate Hash And Embed key)
+        //Not Implemented.
+                
+        //Kernel:Sort Key based on Hash.
+        //Not Implemented.
+        
+        //Kernel:Align data based on sorted-Key,and Generate Hash range reference map(HRRM).
+        //Not Implemented.
+        
+        //Kernel:using Aligned data and HRRM,calculate Force fast.
+        //Not Implemented.
+
         
         
         {
