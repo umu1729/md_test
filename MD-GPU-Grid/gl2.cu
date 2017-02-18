@@ -219,7 +219,77 @@ __global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float 
     d_fz[i]=t_fz;
 }
 
-__global void HashFromPosition(){
+void CalculateForce_UseGPU_Naive(float* h_p,float *h_f,float* d_p,float *d_f,int nElem,float length){
+    int nBytes = nElem * sizeof(float);
+    cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
+    dim3 block(256);
+    dim3 grid((nElem+block.x-1)/block.x);
+    CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
+    cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
+}
+
+__host__ __device__ inline int getHash(float x,float y,float z,int gC,float hL){
+    // gC is grid Count(1dim) 
+    // hL is grid Length(one grid,1dim)
+    int Hx = (int)floorf(x/hL); //!!! if x == hL * gC ,it cause error!!!
+    int Hy = (int)floorf(y/hL);
+    int Hz = (int)floorf(z/hL);
+    return Hx + Hy*(1<<6) + Hz*(1<<12); //this implemention uses gC < (1<<6 or 64);
+}
+
+__global__ void HashFromPosition(float *d_p,int *d_hash,int nElem,int gC,float hL){
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    float x = d_p[idx];
+    float y = d_p[nElem+idx];
+    float z = d_p[2*nElem+idx];
+    int h = getHash(x,y,z,gC,hL);
+    d_hash[idx] = h;
+    d_hash[idx+nElem] = idx; //it's key;
+}
+
+typedef struct{
+    int *d_HashKeyIn; //nElem * 2 (pair of hash and key);
+    int *d_HashKeyOut;
+    int *d_HRRM;//?
+    int *h_HashKeyTest;//TestBuf
+} WorkBufList;
+
+
+void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem,float length,WorkBufList wbl){
+    float cutRadius = 4.0f;
+    int gC = floor(length/cutRadius); //grid Size(1dim)
+    float hL = length/gC; //cutRadius
+    
+    
+    //Need Memcpy h2d;
+    //N I
+    
+    dim3 block(256);
+    dim3 grid(nElem/block.x);
+
+    //Kernel:Hashing (Generate Hash And Embed key)
+    HashFromPosition<<<grid,block>>>(d_p,wbl.d_HashKeyIn,nElem,gC,hL);
+    cudaDeviceSynchronize();
+    
+    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKeyIn,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
+    
+
+    int cor = 0;
+    for (int i=0;i<nElem;i++){
+        float x,y,z;
+        int j = i;
+        x = h_p[j];
+        y = h_p[j+nElem];
+        z = h_p[j+2*nElem];
+        bool check = wbl.h_HashKeyTest[i]==getHash(x,y,z,gC,hL);
+        if (!check)printf("E:%f,%f,%f,%d,%d,%d,%d,%d\n",x,y,z,getHash(x,y,z,gC,hL),wbl.h_HashKeyTest[i],(int)floor(x/hL),(int)floor(y/hL),(int)floor(z/hL));
+        if (check)cor++;
+    }
+    printf("%d\n",cor);
+    
+    //Kernel:Sort Key based on Hash.
+    //Kernel:Generate Hash range reference map(HRRM).
+    //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
 }
 
 
@@ -238,25 +308,32 @@ void cuMain(void (*grpc)(V3Buf buf) ){
 
     //Buffer Initialization (GPU)
     float *d_p,*d_f;
+    int *d_HashKeyIn,*d_HashKeyOut;
     cudaMalloc(&d_p,nBytes*3);
     cudaMalloc(&d_f,nBytes*3);
+    cudaMalloc(&d_HashKeyIn,nElem*2*sizeof(int));
+    cudaMalloc(&d_HashKeyOut,nElem*2*sizeof(int));
     float *h_df; //Test Buf;
+    int *h_dh; // Test Buf;
     h_df = (float *)malloc(nBytes*3);
-    
+    h_dh = (int *)malloc(nElem*2*sizeof(int));
 
+    WorkBufList wbl = {d_HashKeyIn,d_HashKeyOut,nullptr,h_dh};
 
     //Buffer Setting
 
     float length;
-    V3Buf h_v3pos = CreateUniformParticles(h_p,1.5f,nElem,&length);
+    V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
+    
+    printf("length%f",length);
     
     for (int i=0;i<nElem;i++){
         h_v[i]*=10.0f;
     }
 
     double potential;
-    CalculateForce(h_f,h_p,nElem,length,&potential);//Zeroth Calculation;
+    CalculateForce_UseGPU_Naive(h_p,h_f,d_p,d_f,nElem,length);
 
     float dt = 0.005;
     int it = 0;
@@ -276,37 +353,15 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         //Force buffer becomes old because of position updated.
         SwapFloatPointer(&h_f,&h_fd);
         
-        //Kernel:Hashing (Generate Hash And Embed key)
-        //Not Implemented.
-                
-        //Kernel:Sort Key based on Hash.
-        //Not Implemented.
+        CalculateForce_UseGPU_Naive(h_p,h_f,d_p,d_f,nElem,length);
         
-        //Kernel:Align data based on sorted-Key,and Generate Hash range reference map(HRRM).
-        //Not Implemented.
-        
-        //Kernel:using Aligned data and HRRM,calculate Force fast.
-        //Not Implemented.
-
-        
-        
-        {
-            cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
-            dim3 block(32);
-            dim3 grid((nElem+block.x-1)/block.x);
-            CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
-            cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
-            //CalculateForce(h_f,h_p,nElem,length,&potential);
-            //printf("%f,%f\n",h_f[6000],h_df[6000]);
-        }
-        
-        
+        CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
         
         for (int i=0;i<nElem*3;i++){
             h_v[i]+=dt*0.5*(h_f[i]+h_fd[i]);
         }
         
-        CalculateHamiltonian(h_p,h_v,nElem,potential);
+        //CalculateHamiltonian(h_p,h_v,nElem,potential);
         
         it++;
     }
