@@ -16,7 +16,7 @@ bool flag = false;
 //緑
 GLfloat green[] = { 0.0, 1.0, 0.0, 1.0 };
 //ライトの位置
-GLfloat lightpos[] = { 200.0, 150.0, -500.0, 1.0 };
+GLfloat lightpos[] = { -200.0, -150.0, -500.0, 1.0 };
 
 
 V3Buf v3Buf;
@@ -33,8 +33,8 @@ void display(void)
  glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
  //視点の設定
- gluLookAt(6.0,6.0,-20.0, //カメラの座標
-      6.0,6.0,0.0, // 注視点の座標
+ gluLookAt(-10.0,-10.0,-10.0, //カメラの座標
+      0.0,0.0,0.0, // 注視点の座標
      0.0,1.0,0.0); // 画面の上方向を指すベクトル
  //ライトの設定
  glLightfv(GL_LIGHT0, GL_POSITION, lightpos);

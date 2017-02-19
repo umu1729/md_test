@@ -386,7 +386,7 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     
     dim3 block(256);
     dim3 grid(nElem/block.x);
-    printf("G<%d>",grid.x);
+    //printf("G<%d>",grid.x);
     
     CHECK(cudaGetLastError());
 
@@ -396,28 +396,7 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     
     CHECK(cudaGetLastError());
 
-/*
-    {
-        cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
-        int count = 0;
-        int ck = 0;
-        int *ct;
-        ct = (int*)malloc(sizeof(int)*nElem);
-        memset(ct,0,sizeof(int)*nElem);
-        for (int j = 0;j<nElem;j++){
-            int *hash = (wbl.h_HashKeyTest);
-            int k = hash[j+nElem];
-            int p = hash[j];
-            ct[k]++;
-        }
-        for (int j = 0;j<256;j++){
-            if (ct[j]!=1){
-                printf("[%d:%d]",j,ct[j]);
-            }
-        }
-        free(ct);
-        //printf("C:%d,%d ",count,ck);
-    }*/
+
 
     
     //Kernel:Sort Key based on Hash.
@@ -425,28 +404,6 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     //printf ("%d",nLog2Elem);
     sort(wbl.d_HashKey,wbl.d_HashKeyWork,nLog2Elem); //TYUI! secound parameter is for only work buffer(x:in-out,o:in&out-work)
  
- /*
-    {
-        cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
-        int count = 0;
-        int ck = 0;
-        int *ct;
-        ct = (int*)malloc(sizeof(int)*nElem);
-        memset(ct,0,sizeof(int)*nElem);
-        for (int j = 0;j<nElem;j++){
-            int *hash = (wbl.h_HashKeyTest);
-            int k = hash[j+nElem];
-            int p = hash[j];
-            ct[k]++;
-        }
-        for (int j = 0;j<256;j++){
-            if (ct[j]!=1){
-                printf("(%d:%d)",j,ct[j]);
-            }
-        }
-        free(ct);
-        printf("C:%d,%d ",count,ck);
-    }*/
     
     CHECK(cudaGetLastError());
     
@@ -461,42 +418,7 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
     cudaMemcpy(wbl.h_nElemF,d_p,nBytes*3,cudaMemcpyDeviceToHost);
     
-{
-    printf("HASHDATA\n");
-    for (int j = 0;j<nHash;j++){
-        int* hh=wbl.h_HRRMTest;
-        int hs = hh[j];
-        int he = hh[j+nHash];
-        if (hs!=0 | he!=0){
-            printf("%d:%d,%d ",j,hs,he);
-        }
-    }
-    for (int j = 0;j<1000;j++){
-        int *hash = (wbl.h_HashKeyTest);
-        //printf("<%d",hash[j]);
-    }
-    int count = 0;
-    
-    for (int j = 0;j<nElem;j++){
-        float *pos = wbl.h_nElemF;
-        //float *pos = h_p;
-        int *hash = (wbl.h_HashKeyTest);
-        float x,y,z;
-        int k = hash[j+nElem];
-        int p = hash[j];
-        count += k;
-        //printf("%d ",k);
-        x = pos[k];
-        y = pos[k+nElem];
-        z = pos[k+nElem*2];
-        int h = getHash(x,y,z,gC,hL);
-        if (h!=p){
-            printf("ER");
-        }
-    }
-    printf("C:%d ",count);
-    printf("HASH FINISH\n");
-}
+
     
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
     CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL);
@@ -562,7 +484,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     while(true){
     
         //Graphics Functon(External) :transfer postion buffer to graphics function;
-        if (it%1==0) (*grpc)(h_v3pos);
+        if (it%100==0) (*grpc)(h_v3pos);
         
         //Position Update
         for (int i=0;i<nElem*3;i++){
