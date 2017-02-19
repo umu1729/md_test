@@ -228,7 +228,7 @@ void CalculateForce_UseGPU_Naive(float* h_p,float *h_f,float* d_p,float *d_f,int
     cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
 }
 
-#define HSF 3//hash size = 1<<HSF
+#define HSF 6//hash size = 1<<HSF
 
 __host__ __device__ inline int getHashPart(float v,int gC,float hL){
     return (int)floorf(v/hL);
@@ -322,24 +322,29 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
         int h = HashParts2Hash(pHx,pHy,pHz);
         int start = hrrm[h];
         int end = hrrm[h+nHash];
-        if(!(start<=end & end-start<1000000)){printf("E");};
+        if(!(start<=end & end-start<1000000)){printf("D");};
         
         for (int k=start;k<end;k++){
             int j = hash[k+nElem];
+            if (hash[k]!=h)printf("H");
             if (i==j)continue;
             float dx,dy,dz,r2,r2i,r06i,r12i,fc,fx,fy,fz;
-            dx = d_px[i]-d_px[j];
-            dy = d_py[i]-d_py[j];
-            dz = d_pz[i]-d_pz[j];
+            float qx,qy,qz;
+            qx = d_px[j];
+            qy = d_py[j];
+            qz = d_pz[j];
+            dx = px-qx;
+            dy = py-qy;
+            dz = pz-qz;
             if(dx<-length/2) dx+=length;
             if(dx> length/2) dx-=length;
             if(dy<-length/2) dy+=length;
             if(dy> length/2) dy-=length;
             if(dz<-length/2) dz+=length;
             if(dz> length/2) dz-=length;
-            
+            if (c==13 & dx>hL*3)printf("G");
+            if (getHash(qx,qy,qz,gC,hL)!=h)printf("E");
             r2 = dx*dx+dy*dy+dz*dz;
-            //if (r2 > 4*4)continue; //Cut force with far from cut radius;this may be MEANINGLESS in GPU.
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
             r12i = r06i * r06i;
@@ -365,6 +370,7 @@ typedef struct{
     int *d_HRRM;//?
     int *h_HashKeyTest;//TestBuf
     int *h_HRRMTest;
+    float *h_nElemF;
 } WorkBufList;
 
 
@@ -380,25 +386,128 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     
     dim3 block(256);
     dim3 grid(nElem/block.x);
+    printf("G<%d>",grid.x);
+    
+    CHECK(cudaGetLastError());
 
     //Kernel:Hashing (Generate Hash And Embed key)
     HashFromPosition<<<grid,block>>>(d_p,wbl.d_HashKey,nElem,gC,hL);
     cudaDeviceSynchronize();
     
+    CHECK(cudaGetLastError());
+
+/*
+    {
+        cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
+        int count = 0;
+        int ck = 0;
+        int *ct;
+        ct = (int*)malloc(sizeof(int)*nElem);
+        memset(ct,0,sizeof(int)*nElem);
+        for (int j = 0;j<nElem;j++){
+            int *hash = (wbl.h_HashKeyTest);
+            int k = hash[j+nElem];
+            int p = hash[j];
+            ct[k]++;
+        }
+        for (int j = 0;j<256;j++){
+            if (ct[j]!=1){
+                printf("[%d:%d]",j,ct[j]);
+            }
+        }
+        free(ct);
+        //printf("C:%d,%d ",count,ck);
+    }*/
+
+    
     //Kernel:Sort Key based on Hash.
     int nLog2Elem = (int)log2f((float)(nElem)+0.1f);
+    //printf ("%d",nLog2Elem);
     sort(wbl.d_HashKey,wbl.d_HashKeyWork,nLog2Elem); //TYUI! secound parameter is for only work buffer(x:in-out,o:in&out-work)
+ 
+ /*
+    {
+        cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
+        int count = 0;
+        int ck = 0;
+        int *ct;
+        ct = (int*)malloc(sizeof(int)*nElem);
+        memset(ct,0,sizeof(int)*nElem);
+        for (int j = 0;j<nElem;j++){
+            int *hash = (wbl.h_HashKeyTest);
+            int k = hash[j+nElem];
+            int p = hash[j];
+            ct[k]++;
+        }
+        for (int j = 0;j<256;j++){
+            if (ct[j]!=1){
+                printf("(%d:%d)",j,ct[j]);
+            }
+        }
+        free(ct);
+        printf("C:%d,%d ",count,ck);
+    }*/
+    
+    CHECK(cudaGetLastError());
     
     //Kernel:Generate Hash range reference map(HRRM).
     cudaMemset(wbl.d_HRRM,0,nHash*2*sizeof(int));
     GenerateHRRM<<<grid,block>>>(wbl.d_HashKey,wbl.d_HRRM,nElem);
     cudaDeviceSynchronize();
     
+    CHECK(cudaGetLastError());
+    
+    cudaMemcpy(wbl.h_HRRMTest,wbl.d_HRRM,nHash*2*sizeof(int),cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_nElemF,d_p,nBytes*3,cudaMemcpyDeviceToHost);
+    
+{
+    printf("HASHDATA\n");
+    for (int j = 0;j<nHash;j++){
+        int* hh=wbl.h_HRRMTest;
+        int hs = hh[j];
+        int he = hh[j+nHash];
+        if (hs!=0 | he!=0){
+            printf("%d:%d,%d ",j,hs,he);
+        }
+    }
+    for (int j = 0;j<1000;j++){
+        int *hash = (wbl.h_HashKeyTest);
+        //printf("<%d",hash[j]);
+    }
+    int count = 0;
+    
+    for (int j = 0;j<nElem;j++){
+        float *pos = wbl.h_nElemF;
+        //float *pos = h_p;
+        int *hash = (wbl.h_HashKeyTest);
+        float x,y,z;
+        int k = hash[j+nElem];
+        int p = hash[j];
+        count += k;
+        //printf("%d ",k);
+        x = pos[k];
+        y = pos[k+nElem];
+        z = pos[k+nElem*2];
+        int h = getHash(x,y,z,gC,hL);
+        if (h!=p){
+            printf("ER");
+        }
+    }
+    printf("C:%d ",count);
+    printf("HASH FINISH\n");
+}
+    
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
     CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL);
     //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
     
+    CHECK(cudaGetLastError());
+    
     cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
+    
+    CHECK(cudaGetLastError());
+
 }
 
 
@@ -407,7 +516,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     
     //Buffer Initialization (CPU)
 
-    int nElem = 256*8;
+    int nElem = 256*8*8;
     int nBytes = nElem * sizeof(float);
     float *h_p,*h_v,*h_f,*h_fd;
     h_p = (float*)malloc(nBytes*3);
@@ -429,7 +538,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     h_dh = (int *)malloc(nElem*2*sizeof(int));
     h_d_HRRM = (int *)malloc((1<<(HSF*3))*2*sizeof(int));
 
-    WorkBufList wbl = {d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM};
+    WorkBufList wbl = {d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df};
 
     //Buffer Setting
 
