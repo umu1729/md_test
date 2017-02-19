@@ -67,7 +67,7 @@ void SwapIntPointer(int** a,int **b){
 
 /// d_buf , d_work = buffer [Hash:nElem,Key:nElem] , nElem = 2 << nLog2Elem;
 /// using Hash,sorting Key
-void sort(int** h_d_buf,int** h_d_work,int nLog2Elem){
+void sort(int*& h_d_buf,int*& h_d_work,int nLog2Elem){
     int nLogE = nLog2Elem;
     int nElem = 1 << nLogE;
     for(int i=0;i<nLogE;i++){
@@ -75,15 +75,15 @@ void sort(int** h_d_buf,int** h_d_work,int nLog2Elem){
         int nLogL = 8;
         int nSizL = 1<<nLogL;
         for(;j>= nLogL;j--){
-                bitonicSort_Global<<<nElem/256,256>>>(*h_d_buf,*h_d_work,i,j);
-                SwapIntPointer(h_d_buf,h_d_work);
+                bitonicSort_Global<<<nElem/256,256>>>(h_d_buf,h_d_work,i,j);
+                SwapIntPointer(&h_d_buf,&h_d_work);
                 cudaDeviceSynchronize();
         }
         
         CHECK(cudaGetLastError());
         
-        bitonicSort_Local<<<(nElem+nSizL-1)/nSizL,nSizL,2*nSizL*sizeof(int)>>>(*h_d_buf,*h_d_work,i,j);
-        SwapIntPointer(h_d_buf,h_d_work);
+        bitonicSort_Local<<<(nElem+nSizL-1)/nSizL,nSizL,2*nSizL*sizeof(int)>>>(h_d_buf,h_d_work,i,j);
+        SwapIntPointer(&h_d_buf,&h_d_work);
         cudaDeviceSynchronize();
         
         //printf("%d\n",j);

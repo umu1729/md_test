@@ -228,13 +228,19 @@ void CalculateForce_UseGPU_Naive(float* h_p,float *h_f,float* d_p,float *d_f,int
     cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
 }
 
+#define HSF 3//hash size = 1<<HSF
+
 __host__ __device__ inline int getHash(float x,float y,float z,int gC,float hL){
     // gC is grid Count(1dim) 
     // hL is grid Length(one grid,1dim)
     int Hx = (int)floorf(x/hL); //!!! if x == hL * gC ,it cause error!!!
     int Hy = (int)floorf(y/hL);
     int Hz = (int)floorf(z/hL);
-    return Hx + Hy*(1<<6) + Hz*(1<<12); //this implemention uses gC < (1<<6 or 64);
+    return Hx + Hy*(1<<HSF) + Hz*(1<<(2*HSF)); //this implemention uses gC < (1<<6 or 64);
+}
+
+__host__ __device__ inline void recoverHash(int hash,int &x,int &y,int &z){
+    //Not Implement;
 }
 
 __global__ void HashFromPosition(float *d_p,int *d_hash,int nElem,int gC,float hL){
@@ -247,11 +253,31 @@ __global__ void HashFromPosition(float *d_p,int *d_hash,int nElem,int gC,float h
     d_hash[idx+nElem] = idx; //it's key;
 }
 
+__global__ void GenerateHRRM(int *d_hash,int *d_HRRM,int nElem){
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int nHash = 1<<(HSF*3);
+    
+    int ths = d_hash[idx];
+    if (idx==0){
+        d_HRRM[ths] = 0;
+    }
+    if(idx+1<nElem){
+        int nxt = d_hash[idx+1];
+        if (ths != nxt){
+            d_HRRM[ths+nHash] = idx+1;
+            d_HRRM[nxt]       = idx+1;
+        }
+    }else{//idx = nElem-1
+        d_HRRM[ths+nHash] = nElem;
+    }
+}
+
 typedef struct{
-    int *d_HashKeyIn; //nElem * 2 (pair of hash and key);
-    int *d_HashKeyOut;
+    int *d_HashKey; //nElem * 2 (pair of hash and key);
+    int *d_HashKeyWork;
     int *d_HRRM;//?
     int *h_HashKeyTest;//TestBuf
+    int *h_HRRMTest;
 } WorkBufList;
 
 
@@ -259,7 +285,7 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     float cutRadius = 4.0f;
     int gC = floor(length/cutRadius); //grid Size(1dim)
     float hL = length/gC; //cutRadius
-    
+    int nHash = 1<<(HSF*3);
     
     //Need Memcpy h2d;
     //N I
@@ -268,27 +294,33 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     dim3 grid(nElem/block.x);
 
     //Kernel:Hashing (Generate Hash And Embed key)
-    HashFromPosition<<<grid,block>>>(d_p,wbl.d_HashKeyIn,nElem,gC,hL);
+    HashFromPosition<<<grid,block>>>(d_p,wbl.d_HashKey,nElem,gC,hL);
     cudaDeviceSynchronize();
     
-    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKeyIn,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
-    
-
-    int cor = 0;
-    for (int i=0;i<nElem;i++){
-        float x,y,z;
-        int j = i;
-        x = h_p[j];
-        y = h_p[j+nElem];
-        z = h_p[j+2*nElem];
-        bool check = wbl.h_HashKeyTest[i]==getHash(x,y,z,gC,hL);
-        if (!check)printf("E:%f,%f,%f,%d,%d,%d,%d,%d\n",x,y,z,getHash(x,y,z,gC,hL),wbl.h_HashKeyTest[i],(int)floor(x/hL),(int)floor(y/hL),(int)floor(z/hL));
-        if (check)cor++;
-    }
-    printf("%d\n",cor);
-    
     //Kernel:Sort Key based on Hash.
+    int nLog2Elem = (int)log2f((float)(nElem)+0.1f);
+    sort(wbl.d_HashKey,wbl.d_HashKeyWork,nLog2Elem); //TYUI! secound parameter is for only work buffer(x:in-out,o:in&out-work)
+    
     //Kernel:Generate Hash range reference map(HRRM).
+    cudaMemset(wbl.d_HRRM,0,nHash*2*sizeof(int));
+    GenerateHRRM<<<grid,block>>>(wbl.d_HashKey,wbl.d_HRRM,nElem);
+    cudaDeviceSynchronize();
+    
+    //h_d_HRRM
+    cudaMemcpy(wbl.h_HRRMTest,wbl.d_HRRM,nHash*2*sizeof(int),cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
+    
+    for(int i=0;i<nElem;i++){
+        int* h_H = wbl.h_HashKeyTest;
+        printf("%d,%d\n",h_H[i],h_H[i+nElem]);
+    }
+    for(int i=0;i<nHash;i++){
+        int* h_H = wbl.h_HRRMTest;
+        
+        printf("%d:[%d,%d]\n",i,h_H[i],h_H[i+nHash]);
+    }
+    
+    
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
 }
 
@@ -308,17 +340,19 @@ void cuMain(void (*grpc)(V3Buf buf) ){
 
     //Buffer Initialization (GPU)
     float *d_p,*d_f;
-    int *d_HashKeyIn,*d_HashKeyOut;
+    int *d_HashKeyIn,*d_HashKeyOut,*d_HRRM;
     cudaMalloc(&d_p,nBytes*3);
     cudaMalloc(&d_f,nBytes*3);
     cudaMalloc(&d_HashKeyIn,nElem*2*sizeof(int));
     cudaMalloc(&d_HashKeyOut,nElem*2*sizeof(int));
+    cudaMalloc(&d_HRRM,(1<<(HSF*3))*2*sizeof(int));//HRRM size is determined by HashMax * 2
     float *h_df; //Test Buf;
-    int *h_dh; // Test Buf;
+    int *h_dh,*h_d_HRRM; // Test Buf;
     h_df = (float *)malloc(nBytes*3);
     h_dh = (int *)malloc(nElem*2*sizeof(int));
+    h_d_HRRM = (int *)malloc((1<<(HSF*3))*2*sizeof(int));
 
-    WorkBufList wbl = {d_HashKeyIn,d_HashKeyOut,nullptr,h_dh};
+    WorkBufList wbl = {d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM};
 
     //Buffer Setting
 
