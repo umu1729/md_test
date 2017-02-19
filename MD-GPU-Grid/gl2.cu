@@ -230,13 +230,21 @@ void CalculateForce_UseGPU_Naive(float* h_p,float *h_f,float* d_p,float *d_f,int
 
 #define HSF 3//hash size = 1<<HSF
 
+__host__ __device__ inline int getHashPart(float v,int gC,float hL){
+    return (int)floorf(v/hL);
+}
+
+__host__ __device__ inline int HashParts2Hash(int Hx,int Hy,int Hz){
+    return Hx + Hy*(1<<HSF) + Hz*(1<<(2*HSF)); //this implemention uses gC < (1<<HSF);
+}
+
 __host__ __device__ inline int getHash(float x,float y,float z,int gC,float hL){
     // gC is grid Count(1dim) 
     // hL is grid Length(one grid,1dim)
-    int Hx = (int)floorf(x/hL); //!!! if x == hL * gC ,it cause error!!!
-    int Hy = (int)floorf(y/hL);
-    int Hz = (int)floorf(z/hL);
-    return Hx + Hy*(1<<HSF) + Hz*(1<<(2*HSF)); //this implemention uses gC < (1<<6 or 64);
+    int Hx = getHashPart(x,gC,hL); //!!! if x == hL * gC ,it cause error!!!
+    int Hy = getHashPart(y,gC,hL);
+    int Hz = getHashPart(z,gC,hL);
+    return HashParts2Hash(Hx,Hy,Hz);
 }
 
 __host__ __device__ inline void recoverHash(int hash,int &x,int &y,int &z){
@@ -272,6 +280,85 @@ __global__ void GenerateHRRM(int *d_hash,int *d_HRRM,int nElem){
     }
 }
 
+__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *hash,int nElem,float length,int gC,float hL){
+    int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
+    float *d_fx,*d_fy,*d_fz,*d_px,*d_py,*d_pz;
+    d_fx = force;
+    d_fy = d_fx + nElem;
+    d_fz = d_fy + nElem;
+    d_px = pos;
+    d_py = d_px + nElem;
+    d_pz = d_py + nElem;
+    
+    //SYOKIKA
+    float t_fx=0.0f,t_fy=0.0f,t_fz=0.0f;
+    
+    //*potential = 0.0; must implement to calculate Hamiltoniam...
+    
+    //Is it better to load this constants from ConstantMemory?
+    float eps = 1.0f;
+    float sigma = 1.0f;
+    float ce12 = 4.0f*eps*powf(sigma,12);
+    float ce06 = 4.0f*eps*powf(sigma, 6);
+    float cf12 = ce12 * 12.0f;
+    float cf06 = ce06 *  6.0f;
+    
+    int i = idx;
+    float px = d_px[i];
+    float py = d_py[i];
+    float pz = d_pz[i];
+    int Hx = getHashPart(px,gC,hL);
+    int Hy = getHashPart(py,gC,hL);
+    int Hz = getHashPart(pz,gC,hL);
+    int nHash = 1<<(HSF*3);
+    
+    for (int c=0;c<27;c++){
+        int dHx = c%3-1;
+        int dHy = (c/3)%3-1;
+        int dHz = (c/3/3)%3-1;
+        int pHx = (Hx+gC+dHx)%gC;
+        int pHy = (Hy+gC+dHy)%gC;
+        int pHz = (Hz+gC+dHz)%gC;
+        int h = HashParts2Hash(pHx,pHy,pHz);
+        int start = hrrm[h];
+        int end = hrrm[h+nHash];
+        if(!(start<=end & end-start<1000000)){printf("E");};
+        
+        for (int k=start;k<end;k++){
+            int j = hash[k+nElem];
+            if (i==j)continue;
+            float dx,dy,dz,r2,r2i,r06i,r12i,fc,fx,fy,fz;
+            dx = d_px[i]-d_px[j];
+            dy = d_py[i]-d_py[j];
+            dz = d_pz[i]-d_pz[j];
+            if(dx<-length/2) dx+=length;
+            if(dx> length/2) dx-=length;
+            if(dy<-length/2) dy+=length;
+            if(dy> length/2) dy-=length;
+            if(dz<-length/2) dz+=length;
+            if(dz> length/2) dz-=length;
+            
+            r2 = dx*dx+dy*dy+dz*dz;
+            //if (r2 > 4*4)continue; //Cut force with far from cut radius;this may be MEANINGLESS in GPU.
+            r2i = 1.0f/r2;
+            r06i = r2i * r2i * r2i;
+            r12i = r06i * r06i;
+            //*potential += (ce12 * r12i - ce06 * r06i);
+            fc = (cf12*r12i-cf06*r06i)*r2i;
+            fx = fc * dx;
+            fy = fc * dy;
+            fz = fc * dz;
+            t_fx+=fx;
+            t_fy+=fy;
+            t_fz+=fz;
+        }
+    }
+    
+    d_fx[i]=t_fx;
+    d_fy[i]=t_fy;
+    d_fz[i]=t_fz;
+}
+
 typedef struct{
     int *d_HashKey; //nElem * 2 (pair of hash and key);
     int *d_HashKeyWork;
@@ -286,9 +373,10 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     int gC = floor(length/cutRadius); //grid Size(1dim)
     float hL = length/gC; //cutRadius
     int nHash = 1<<(HSF*3);
+    int nBytes = nElem * sizeof(float);
     
-    //Need Memcpy h2d;
-    //N I
+    cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
+    
     
     dim3 block(256);
     dim3 grid(nElem/block.x);
@@ -306,22 +394,11 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     GenerateHRRM<<<grid,block>>>(wbl.d_HashKey,wbl.d_HRRM,nElem);
     cudaDeviceSynchronize();
     
-    //h_d_HRRM
-    cudaMemcpy(wbl.h_HRRMTest,wbl.d_HRRM,nHash*2*sizeof(int),cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
-    
-    for(int i=0;i<nElem;i++){
-        int* h_H = wbl.h_HashKeyTest;
-        printf("%d,%d\n",h_H[i],h_H[i+nElem]);
-    }
-    for(int i=0;i<nHash;i++){
-        int* h_H = wbl.h_HRRMTest;
-        
-        printf("%d:[%d,%d]\n",i,h_H[i],h_H[i+nHash]);
-    }
-    
-    
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
+    CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL);
+    //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
+    
+    cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
 }
 
 
@@ -357,13 +434,15 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     //Buffer Setting
 
     float length;
-    V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
+    V3Buf h_v3pos = CreateUniformParticles(h_p,0.5f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
     
-    printf("length%f",length);
+    printf("length%f\n",length);
     
-    for (int i=0;i<nElem;i++){
-        h_v[i]*=10.0f;
+    for (int i=0;i<nElem*3;i++){
+        //h_v[i]*=10.0f;
+        h_v[i]=(float)((i*7)%13)/13.0f*2.0f-1.0f;
+        h_v[i]*=2.0f;
     }
 
     double potential;
@@ -387,13 +466,15 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         //Force buffer becomes old because of position updated.
         SwapFloatPointer(&h_f,&h_fd);
         
-        CalculateForce_UseGPU_Naive(h_p,h_f,d_p,d_f,nElem,length);
+        //CalculateForce_UseGPU_Naive(h_p,h_f,d_p,d_f,nElem,length);
         
         CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
         
         for (int i=0;i<nElem*3;i++){
             h_v[i]+=dt*0.5*(h_f[i]+h_fd[i]);
         }
+        
+        printf("%f",h_p[1000]);
         
         //CalculateHamiltonian(h_p,h_v,nElem,potential);
         
