@@ -2,13 +2,13 @@
 近傍力としてLJポテンシャルによる力を採用．
 
 
-##MD-CPU
+##MD-CPU[完成]
 CPUでの実装，テスト・比較用
 
-##MD-GPU-Naive
+##MD-GPU-Naive[完成]
 GPUでの実装，ナイーブ．移しただけ．
 
-##MD-GPU-GRID
+##MD-GPU-GRID[完成]
 カット半径によるGRID化．GRID化はナイーブ．雛形．
 
 ##MD-GPU-GRID-SL
