@@ -418,6 +418,26 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
     cudaMemcpy(wbl.h_nElemF,d_p,nBytes*3,cudaMemcpyDeviceToHost);
     
+    {
+        int* ct;
+        int* h_h = wbl.h_HashKeyTest;
+        float* h_n = wbl.h_nElemF;
+        ct = (int * )malloc(nElem*sizeof(int));
+        memset(ct,0,nElem*sizeof(int));
+        for (int j=0;j<nElem;j++){
+            int h = h_h[j];
+            int k = h_h[j+nElem];
+            ct[k]++;
+        }
+        for (int j=0;j<nElem;j++){
+            if (ct[j]!=1){
+                printf("(%d,%d)",j,ct[j]);
+            }
+        }
+
+        
+    }
+
 
     
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
@@ -438,7 +458,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     
     //Buffer Initialization (CPU)
 
-    int nElem = 256*8*8*8;
+    int nElem = 256*8*8;
     int nBytes = nElem * sizeof(float);
     float *h_p,*h_v,*h_f,*h_fd;
     h_p = (float*)malloc(nBytes*3);
@@ -484,7 +504,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     while(true){
     
         //Graphics Functon(External) :transfer postion buffer to graphics function;
-        if (it%20==0) (*grpc)(h_v3pos);//20ステップに１回表示：粒子数が多いと表示で律速するので．
+        if (it%20==0) (*grpc)(h_v3pos);
         
         //Position Update
         for (int i=0;i<nElem*3;i++){

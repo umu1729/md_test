@@ -27,6 +27,40 @@ __global__ void bitonicSort_Global(int *dep,int *tar,int i,int j){
     tar[idx+Pad] = ins?dep[idx+Pad]:dep[jdx+Pad];
 }
 
+
+// 2^j <= blockDim  & blockDim = 2^k
+__global__ void bitonicSort_Local(int *dep,int *tar,int i,int jMax){
+    extern __shared__ int sbuf [];
+    int Pad = blockDim.x * gridDim.x;
+    int sPad = blockDim.x;
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int itx = threadIdx.x;
+    
+    sbuf[itx] = dep[idx];
+    sbuf[itx+sPad] = dep[idx+Pad];
+    __syncthreads();
+    
+    
+    for (int j=jMax;j>=0;j--){
+        int dec = (idx >> (i+1))&0x1;
+        int jtx = itx ^ (1<<j);
+        int rig = (idx >> j)&0x1;
+        int sel = sbuf[itx];
+        int opp = sbuf[jtx];
+        int ksel = sbuf[itx+sPad];
+        int kopp = sbuf[jtx+sPad];
+        bool ima = opp < sel;
+        bool ins = (dec ^ rig) == ima  | sel == opp;
+        __syncthreads();
+        sbuf[itx] = ins?sel:opp;
+        sbuf[itx+sPad] = ins?ksel:kopp;
+        __syncthreads();
+    }
+
+    tar[idx] = sbuf[itx];
+    tar[idx+Pad] = sbuf[itx + sPad];
+}
+
 void SwapIntPointer(int** a,int **b){
     int *tmp = *b;
     *b = *a;
@@ -47,7 +81,7 @@ void sort(int*& h_d_buf,int*& h_d_work,int nLog2Elem){
         int nLogL = 8;
         int nSizL = 1<<nLogL;
         
-        for(;j>= 0;j--){
+        for(;j>= 8;j--){
                 bitonicSort_Global<<<nElem/nSizL,nSizL>>>(h_d_buf,h_d_work,i,j);
                 SwapIntPointer(&h_d_buf,&h_d_work);
                 cudaDeviceSynchronize();
@@ -55,6 +89,13 @@ void sort(int*& h_d_buf,int*& h_d_work,int nLog2Elem){
             
                 CHECK(cudaGetLastError());
         }
+        
+        CHECK(cudaGetLastError());
+        
+        bitonicSort_Local<<<(nElem+nSizL-1)/nSizL,nSizL,2*nSizL*sizeof(int)>>>(h_d_buf,h_d_work,i,j);
+        SwapIntPointer(&h_d_buf,&h_d_work);
+        cudaDeviceSynchronize();
+        
         
         //printf("%d\n",j);
         CHECK(cudaGetLastError());

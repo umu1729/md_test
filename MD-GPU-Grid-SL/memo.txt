@@ -1,0 +1,15 @@
+which is the best choice:
+
+1. 
+        //Kernel:Hashing (Generate Hash And Embed key)
+        //Kernel:Sort Key based on Hash.
+        //Kernel:Align "All" data based on sorted-Key,and Generate Hash range reference map(HRRM).
+        //Kernel:using Aligned data and HRRM,calculate Force fast.
+        1.1 Aligned data must be used for Next Steps;
+        1.2 Aligned data must be thrown away and use Non-Aligned data.
+2.
+        //Kernel:Hashing (Generate Hash And Embed key)
+        //Kernel:Sort Key based on Hash.
+        //Kernel:Generate Hash range reference map(HRRM).
+        //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
+
