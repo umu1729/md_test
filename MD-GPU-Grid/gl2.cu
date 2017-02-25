@@ -142,17 +142,16 @@ double CalculateHamiltonian(float* pos,float* vel,int nElem,double potential){
     h_vz = h_vy + nElem;
     
     double energy = 0.0;
-    for(int i=0;i<1;i++){
+    for(int i=0;i<nElem;i++){
         float px=h_px[i],py=h_py[i],pz=h_pz[i];
         float vx=h_vx[i],vy=h_vy[i],vz=h_vz[i];
         float r = sqrtf(px*px+py*py+pz*pz);
         float v2= vx*vx+vy*vy+vz*vz;
         energy += (double)(v2/2);
     }
-    energy += potential;
-    //printf("%lf\n",energy);
+    printf("%lf  %lf  %lf\n",energy+potential,energy,potential);
     
-    return energy;
+    return energy+potential;
 }
 
 void SwapFloatPointer(float** a,float **b){
@@ -280,7 +279,7 @@ __global__ void GenerateHRRM(int *d_hash,int *d_HRRM,int nElem){
     }
 }
 
-__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *hash,int nElem,float length,int gC,float hL){
+__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *hash,int nElem,float length,int gC,float hL,float *d_pot){
     int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
     float *d_fx,*d_fy,*d_fz,*d_px,*d_py,*d_pz;
     d_fx = force;
@@ -293,7 +292,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
     //SYOKIKA
     float t_fx=0.0f,t_fy=0.0f,t_fz=0.0f;
     
-    //*potential = 0.0; must implement to calculate Hamiltoniam...
+    double potential = 0.0;// must implement to calculate Hamiltoniam...
     
     //Is it better to load this constants from ConstantMemory?
     float eps = 1.0f;
@@ -348,7 +347,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
             r12i = r06i * r06i;
-            //*potential += (ce12 * r12i - ce06 * r06i);
+            potential += (ce12 * r12i - ce06 * r06i);
             fc = (cf12*r12i-cf06*r06i)*r2i;
             fx = fc * dx;
             fy = fc * dy;
@@ -362,9 +361,12 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
     d_fx[i]=t_fx;
     d_fy[i]=t_fy;
     d_fz[i]=t_fz;
+    d_pot[i]=potential;
 }
 
 typedef struct{
+    float * h_pot;
+    float * d_pot;
     int *d_HashKey; //nElem * 2 (pair of hash and key);
     int *d_HashKeyWork;
     int *d_HRRM;//?
@@ -421,8 +423,10 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
 
     
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
-    CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL);
+    CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL,wbl.d_pot);
     //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
+    
+    cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
     
     CHECK(cudaGetLastError());
     
@@ -440,27 +444,29 @@ void cuMain(void (*grpc)(V3Buf buf) ){
 
     int nElem = 256*8*8*8;
     int nBytes = nElem * sizeof(float);
-    float *h_p,*h_v,*h_f,*h_fd;
+    float *h_p,*h_v,*h_f,*h_fd,*h_pot;
     h_p = (float*)malloc(nBytes*3);
     h_v = (float*)malloc(nBytes*3);
     h_f = (float*)malloc(nBytes*3);
     h_fd= (float*)malloc(nBytes*3);
+    h_pot = (float*)malloc(nBytes);
 
     //Buffer Initialization (GPU)
-    float *d_p,*d_f;
+    float *d_p,*d_f,*d_pot;
     int *d_HashKeyIn,*d_HashKeyOut,*d_HRRM;
     cudaMalloc(&d_p,nBytes*3);
     cudaMalloc(&d_f,nBytes*3);
     cudaMalloc(&d_HashKeyIn,nElem*2*sizeof(int));
     cudaMalloc(&d_HashKeyOut,nElem*2*sizeof(int));
     cudaMalloc(&d_HRRM,(1<<(HSF*3))*2*sizeof(int));//HRRM size is determined by HashMax * 2
+    cudaMalloc(&d_pot,nBytes);
     float *h_df; //Test Buf;
     int *h_dh,*h_d_HRRM; // Test Buf;
     h_df = (float *)malloc(nBytes*3);
     h_dh = (int *)malloc(nElem*2*sizeof(int));
     h_d_HRRM = (int *)malloc((1<<(HSF*3))*2*sizeof(int));
 
-    WorkBufList wbl = {d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df};
+    WorkBufList wbl = {h_pot,d_pot,d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df};
 
     //Buffer Setting
 
@@ -505,9 +511,15 @@ void cuMain(void (*grpc)(V3Buf buf) ){
             h_v[i]+=dt*0.5*(h_f[i]+h_fd[i]);
         }
         
-        printf("%f",h_p[1000]);
+        //printf("%f",h_p[1000]);
         
-        //CalculateHamiltonian(h_p,h_v,nElem,potential);
+        potential = 0;
+        for (int i=0;i<nElem;i++){
+            potential += h_pot[i];
+        }
+        potential /=2.;
+        
+        CalculateHamiltonian(h_p,h_v,nElem,potential);
         
         it++;
     }

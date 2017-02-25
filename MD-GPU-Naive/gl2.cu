@@ -146,17 +146,16 @@ double CalculateHamiltonian(float* pos,float* vel,int nElem,double potential){
     h_vz = h_vy + nElem;
     
     double energy = 0.0;
-    for(int i=0;i<1;i++){
+    for(int i=0;i<nElem;i++){
         float px=h_px[i],py=h_py[i],pz=h_pz[i];
         float vx=h_vx[i],vy=h_vy[i],vz=h_vz[i];
         float r = sqrtf(px*px+py*py+pz*pz);
         float v2= vx*vx+vy*vy+vz*vz;
         energy += (double)(v2/2);
     }
-    energy += potential;
-    //printf("%lf\n",energy);
+    printf("%lf  %lf  %lf\n",energy+potential,energy,potential);
     
-    return energy;
+    return energy+potential;
 }
 
 void SwapFloatPointer(float** a,float **b){
@@ -165,7 +164,7 @@ void SwapFloatPointer(float** a,float **b){
     *a = tmp;
 }
 
-__global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float length){
+__global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float length,float *pot){
 
     int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
 
@@ -180,7 +179,7 @@ __global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float 
     //SYOKIKA
     float t_fx=0.0f,t_fy=0.0f,t_fz=0.0f;
     
-    //*potential = 0.0; must implement to calculate Hamiltoniam...
+    double potential = 0.0; //must implement to calculate Hamiltoniam...
     
     //Is it better to load this constants from ConstantMemory?
     float eps = 1.0f;
@@ -209,7 +208,7 @@ __global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float 
         r2i = 1.0f/r2;
         r06i = r2i * r2i * r2i;
         r12i = r06i * r06i;
-        //*potential += (ce12 * r12i - ce06 * r06i);
+        potential += (ce12 * r12i - ce06 * r06i);
         fc = (cf12*r12i-cf06*r06i)*r2i;
         fx = fc * dx;
         fy = fc * dy;
@@ -221,6 +220,7 @@ __global__ void CalculateForce_GPUNaive(float *force,float *pos,int nElem,float 
     d_fx[i]=t_fx;
     d_fy[i]=t_fy;
     d_fz[i]=t_fz;
+    pot[i]=(float)potential;
 }
 
 
@@ -231,16 +231,18 @@ void cuMain(void (*grpc)(V3Buf buf) ){
 
     int nElem = 256*8;
     int nBytes = nElem * sizeof(float);
-    float *h_p,*h_v,*h_f,*h_fd;
+    float *h_p,*h_v,*h_f,*h_fd,*h_pot;
     h_p = (float*)malloc(nBytes*3);
     h_v = (float*)malloc(nBytes*3);
     h_f = (float*)malloc(nBytes*3);
     h_fd= (float*)malloc(nBytes*3);
+    h_pot = (float*)malloc(nBytes);
 
     //Buffer Initialization (GPU)
-    float *d_p,*d_f;
+    float *d_p,*d_f,*d_pot;
     cudaMalloc(&d_p,nBytes*3);
     cudaMalloc(&d_f,nBytes*3);
+    cudaMalloc(&d_pot,nBytes);
     float *h_df; //Test Buf;
     h_df = (float *)malloc(nBytes*3);
     
@@ -249,7 +251,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     //Buffer Setting
 
     float length;
-    V3Buf h_v3pos = CreateUniformParticles(h_p,1.5f,nElem,&length);
+    V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
     
     for (int i=0;i<nElem;i++){
@@ -280,8 +282,9 @@ void cuMain(void (*grpc)(V3Buf buf) ){
             cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
             dim3 block(32);
             dim3 grid((nElem+block.x-1)/block.x);
-            CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
+            CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length,d_pot);
             cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_pot,d_pot,nBytes,cudaMemcpyDeviceToHost);
             //CalculateForce(h_f,h_p,nElem,length,&potential);
             //printf("%f,%f\n",h_f[6000],h_df[6000]);
         }
@@ -291,6 +294,12 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         for (int i=0;i<nElem*3;i++){
             h_v[i]+=dt*0.5*(h_f[i]+h_fd[i]);
         }
+        
+        potential = 0;
+        for (int i=0;i<nElem;i++){
+            potential += h_pot[i];
+        }
+        potential /=2.;
         
         CalculateHamiltonian(h_p,h_v,nElem,potential);
         

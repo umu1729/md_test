@@ -148,10 +148,9 @@ double CalculateHamiltonian(float* pos,float* vel,int nElem,double potential){
         float v2= vx*vx+vy*vy+vz*vz;
         energy += (double)(v2/2);
     }
-    energy += potential;
-    printf("%lf\n",energy);
+    printf("%lf  %lf  %lf\n",energy+potential,energy,potential);
     
-    return energy;
+    return energy+potential;;
 }
 
 void SwapFloatPointer(float** a,float **b){
@@ -177,7 +176,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
     
     for (int i=0;i<nElem;i++){
-        h_v[i]*=4.0f;
+        h_v[i]*=10.0f;
     }
 
     double potential;

@@ -148,17 +148,16 @@ double CalculateHamiltonian(float* pos,float* vel,int nElem,double potential){
     float k = 10.0f;
     
     double energy = 0.0;
-    for(int i=0;i<1;i++){
+    for(int i=0;i<nElem;i++){
         float px=h_px[i],py=h_py[i],pz=h_pz[i];
         float vx=h_vx[i],vy=h_vy[i],vz=h_vz[i];
         float r = sqrtf(px*px+py*py+pz*pz);
         float v2= vx*vx+vy*vy+vz*vz;
         energy += (double)(v2/2);
     }
-    energy += potential;
-    printf("%lf\n",energy);
+    printf("%lf  %lf  %lf\n",energy+potential,energy,potential);
     
-    return energy;
+    return energy+potential;
 }
 
 void SwapFloatPointer(float** a,float **b){
