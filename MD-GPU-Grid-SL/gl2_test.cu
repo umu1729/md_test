@@ -88,7 +88,6 @@ V3Buf CalculateForce(float *force,float *pos,int nElem,float length,double *pote
     }
 
     *potential = 0.0;
-    
     float eps = 1.0f;
     float sigma = 1.0f;
     float ce12 = 4.0f*eps*powf(sigma,12);
@@ -109,7 +108,7 @@ V3Buf CalculateForce(float *force,float *pos,int nElem,float length,double *pote
             if(dz> length/2) dz-=length;
             
             r2 = dx*dx+dy*dy+dz*dz;
-            if (r2 > 4*4)continue;
+            if (r2 > 4*4){continue;}
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
             r12i = r06i * r06i;
@@ -344,6 +343,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
             if (c==13 & dx>hL*3)printf("G");
             if (getHash(qx,qy,qz,gC,hL)!=h)printf("E");
             r2 = dx*dx+dy*dy+dz*dz;
+            if(r2 > 4*4){continue;}
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
             r12i = r06i * r06i;
@@ -484,13 +484,13 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     }
 
     
-    //CalculateForce_UseGPU(h_p,h_fg,d_p,d_f,nElem,length,wbl);
-    CalculateForce_UseGPU_Naive(h_p,h_fg,d_p,d_f,nElem,length);
+    CalculateForce_UseGPU(h_p,h_fg,d_p,d_f,nElem,length,wbl);
+    //CalculateForce_UseGPU_Naive(h_p,h_fg,d_p,d_f,nElem,length);
     double pot;
     CalculateForce(h_fh,h_p,nElem,length,&pot);
 
-    for (int i=0;i<nElem;i++){
-        printf("%f %f %f %f\n",h_fh[i],h_fg[i],fabs(h_fh[i]),fabs((h_fh[i]-h_fg[i])/h_fh[i]));
+    for (int i=0;i<nElem*3;i++){
+        printf("%f %f\n",fabs(h_fh[i]),fabs(h_fh[i]-h_fg[i]));
     }
    
 }
