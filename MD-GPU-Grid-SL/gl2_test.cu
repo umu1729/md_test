@@ -442,12 +442,14 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     
     //Buffer Initialization (CPU)
 
-    int nElem = 256*8*8*8;
+    int nElem = 256*8*8;//*8;
     int nBytes = nElem * sizeof(float);
-    float *h_p,*h_v,*h_f,*h_pot;
+    float *h_p,*h_v,*h_fh,*h_fg,*h_pot;
     h_p = (float*)malloc(nBytes*3);
     h_v = (float*)malloc(nBytes*3);
-    h_f = (float*)malloc(nBytes*3);
+    h_fh = (float*)malloc(nBytes*3);
+    h_fg = (float*)malloc(nBytes*3);
+    
     h_pot = (float*)malloc(nBytes);
 
     //Buffer Initialization (GPU)
@@ -482,44 +484,13 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     }
 
     
-    CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
+    //CalculateForce_UseGPU(h_p,h_fg,d_p,d_f,nElem,length,wbl);
+    CalculateForce_UseGPU_Naive(h_p,h_fg,d_p,d_f,nElem,length);
+    double pot;
+    CalculateForce(h_fh,h_p,nElem,length,&pot);
 
-    float dt = 0.005;
-    int it = 0;
-    while(true){
-    
-        //Graphics Functon(External) :transfer postion buffer to graphics function;
-        if (it%20==0) (*grpc)(h_v3pos);//20ステップに１回表示：粒子数が多いと表示で律速するので．
-        
-        
-        for (int i=0;i<nElem*3;i++){
-            h_v[i]+=dt*0.5*h_f[i];
-        }
-        
-        //Position Update
-        for (int i=0;i<nElem*3;i++){
-            float p = h_p[i];
-            p+=dt*h_v[i];
-            p = p- floorf(p/length)*length;
-            h_p[i] = p;
-        }
-       
-        
-        CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
-        
-        for (int i=0;i<nElem*3;i++){
-            h_v[i]+=dt*0.5*h_f[i];
-        }
-        
-        double potential = 0;
-        for (int i=0;i<nElem;i++){
-            potential += h_pot[i];
-        }
-        potential /=2.;
-        
-        CalculateHamiltonian(h_p,h_v,nElem,potential);
-        
-        it++;
+    for (int i=0;i<nElem;i++){
+        printf("%f %f %f %f\n",h_fh[i],h_fg[i],fabs(h_fh[i]),fabs((h_fh[i]-h_fg[i])/h_fh[i]));
     }
-    
+   
 }

@@ -82,13 +82,14 @@ void Resize( int w, int h )
 }
 int main(int argc, char **argv)
 {
+    int handle;
     //strcmp(argv[1],"debug"))
     if (1==1){
         glutInitWindowPosition(100, 100);
         glutInitWindowSize(WIDTH, HEIGHT);
         glutInit(&argc, argv);
         glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
-        glutCreateWindow("球を表示して平行移動");
+        handle = glutCreateWindow("球を表示して平行移動");
         glutDisplayFunc(NOTHING);
         glutIdleFunc(NOTHING);
         glutReshapeFunc( Resize );
@@ -97,5 +98,8 @@ int main(int argc, char **argv)
     }else{
         cuMain(LoopNoDebug);
     }
+
+    
+    
      return 0;
 }
