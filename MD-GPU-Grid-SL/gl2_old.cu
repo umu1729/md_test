@@ -88,6 +88,7 @@ V3Buf CalculateForce(float *force,float *pos,int nElem,float length,double *pote
     }
 
     *potential = 0.0;
+    
     float eps = 1.0f;
     float sigma = 1.0f;
     float ce12 = 4.0f*eps*powf(sigma,12);
@@ -108,7 +109,7 @@ V3Buf CalculateForce(float *force,float *pos,int nElem,float length,double *pote
             if(dz> length/2) dz-=length;
             
             r2 = dx*dx+dy*dy+dz*dz;
-            if (r2 > 4*4){continue;}
+            if (r2 > 4*4)continue;
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
             r12i = r06i * r06i;
@@ -343,7 +344,6 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
             if (c==13 & dx>hL*3)printf("G");
             if (getHash(qx,qy,qz,gC,hL)!=h)printf("E");
             r2 = dx*dx+dy*dy+dz*dz;
-            if(r2 > 4*4){continue;}
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
             r12i = r06i * r06i;
@@ -379,6 +379,7 @@ typedef struct{
 void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem,float length,WorkBufList wbl){
     float cutRadius = 4.0f;
     int gC = floor(length/cutRadius); //grid Size(1dim)
+    printf("gC:%d\n",gC);
     float hL = length/gC; //cutRadius
     int nHash = 1<<(HSF*3);
     int nBytes = nElem * sizeof(float);
@@ -442,14 +443,12 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     
     //Buffer Initialization (CPU)
 
-    int nElem = 256*8*8;//*8;
+    int nElem = 256*8*8*8;
     int nBytes = nElem * sizeof(float);
-    float *h_p,*h_v,*h_fh,*h_fg,*h_pot;
+    float *h_p,*h_v,*h_f,*h_pot;
     h_p = (float*)malloc(nBytes*3);
     h_v = (float*)malloc(nBytes*3);
-    h_fh = (float*)malloc(nBytes*3);
-    h_fg = (float*)malloc(nBytes*3);
-    
+    h_f = (float*)malloc(nBytes*3);
     h_pot = (float*)malloc(nBytes);
 
     //Buffer Initialization (GPU)
@@ -472,7 +471,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     //Buffer Setting
 
     float length;
-    V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
+    V3Buf h_v3pos = CreateUniformParticles(h_p,0.5f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
     
     printf("length%f\n",length);
@@ -481,17 +480,47 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         //h_v[i]*=10.0f;
         h_v[i]=(float)((i*7)%13)/13.0f*2.0f-1.0f;
         h_v[i]*=2.0f;
-        h_p[i]+=((float)((i*13)%17)/13.0f*2.0f-1.0f)*0.03f;
     }
 
     
-    CalculateForce_UseGPU(h_p,h_fg,d_p,d_f,nElem,length,wbl);
-    //CalculateForce_UseGPU_Naive(h_p,h_fg,d_p,d_f,nElem,length);
-    double pot;
-    CalculateForce(h_fh,h_p,nElem,length,&pot);
+    CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
 
-    for (int i=0;i<nElem*3;i++){
-        printf("%10.10f %10.10f\n",fabs(h_fh[i]),fabs(h_fh[i]-h_fg[i]));
+    float dt = 0.005;
+    int it = 0;
+    while(true){
+    
+        //Graphics Functon(External) :transfer postion buffer to graphics function;
+        if (it%20==0) (*grpc)(h_v3pos);//20ステップに１回表示：粒子数が多いと表示で律速するので．
+        
+        
+        for (int i=0;i<nElem*3;i++){
+            h_v[i]+=dt*0.5*h_f[i];
+        }
+        
+        //Position Update
+        for (int i=0;i<nElem*3;i++){
+            float p = h_p[i];
+            p+=dt*h_v[i];
+            p = p- floorf(p/length)*length;
+            h_p[i] = p;
+        }
+       
+        
+        CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
+        
+        for (int i=0;i<nElem*3;i++){
+            h_v[i]+=dt*0.5*h_f[i];
+        }
+        
+        double potential = 0;
+        for (int i=0;i<nElem;i++){
+            potential += h_pot[i];
+        }
+        potential /=2.;
+        
+        CalculateHamiltonian(h_p,h_v,nElem,potential);
+        
+        it++;
     }
-   
+    
 }

@@ -442,7 +442,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     
     //Buffer Initialization (CPU)
 
-    int nElem = 256*8*8*8;
+    int nElem = 256*8*8;
     int nBytes = nElem * sizeof(float);
     float *h_p,*h_v,*h_f,*h_pot;
     h_p = (float*)malloc(nBytes*3);
@@ -470,7 +470,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     //Buffer Setting
 
     float length;
-    V3Buf h_v3pos = CreateUniformParticles(h_p,0.5f,nElem,&length);
+    V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
     
     printf("length%f\n",length);
