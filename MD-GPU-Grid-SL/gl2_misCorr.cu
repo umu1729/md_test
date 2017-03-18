@@ -346,6 +346,8 @@ __device__ inline void warpLevelIndex(int* s,int *t){
 
 __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *hash,int nElem,float length,int gC,float hL,float *d_pot){
     int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
+    int sdx = threadIdx.x;
+    int wdx = sdx%32;
     float *d_fx,*d_fy,*d_fz,*d_px,*d_py,*d_pz;
     d_fx = force;
     d_fy = d_fx + nElem;
@@ -354,7 +356,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
     d_py = d_px + nElem;
     d_pz = d_py + nElem;
     
-    
+    extern __shared__ float smem[]; //size must equals to blockDim.x*sizeof(float)*3
     
     //SYOKIKA
     float t_fx=0.0f,t_fy=0.0f,t_fz=0.0f;
@@ -379,18 +381,88 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
     int Hh = HashParts2Hash(Hx,Hy,Hz);
     int nHash = 1<<(HSF*3);
     
+    int hid = 0;
+    warpLevelIndex(&Hh,&hid);
+    
+    for (int ind = 0; ind <32 ; ind++){
+    
+        if (hid == ind){
+            smem[(sdx-wdx)*3+0] = Hx;
+            smem[(sdx-wdx)*3+1] = Hy;
+            smem[(sdx-wdx)*3+2] = Hz;
+        }
+       
+        __syncthreads();
+        int sHx = smem[(sdx-wdx)*3+0]; 
+        int sHy = smem[(sdx-wdx)*3+1]; 
+        int sHz = smem[(sdx-wdx)*3+2];
+        
+        
         for (int c=0;c<27;c++){
             int dHx = c%3-1;
             int dHy = (c/3)%3-1;
             int dHz = (c/3/3)%3-1;
-            int pHx = (Hx+gC+dHx)%gC;
-            int pHy = (Hy+gC+dHy)%gC;
-            int pHz = (Hz+gC+dHz)%gC;
+            int pHx = (sHx+gC+dHx)%gC;
+            int pHy = (sHy+gC+dHy)%gC;
+            int pHz = (sHz+gC+dHz)%gC;
             int h = HashParts2Hash(pHx,pHy,pHz);
             int start = hrrm[h];
             int end = hrrm[h+nHash];
             if(!(start<=end & end-start<1000000)){printf("D");};
             
+            int Wst = start/32;
+            int Wen = (end-1)/32 + 1;
+
+            for (int Wid = Wst; Wid<Wen; Wid ++){
+                __syncthreads();
+                smem[sdx*3+0] = d_px[Wid*32+wdx];
+                smem[sdx*3+1] = d_py[Wid*32+wdx];
+                smem[sdx*3+2] = d_pz[Wid*32+wdx]; 
+                __syncthreads(); //‚±‚ê‚æ‚è‘O‚É continue or break ‚ð“ü‚ê‚é‚Æsmem‚ª‚¨‚©‚µ‚­‚È‚é‚Ì‚ÅNG
+                
+                if (hid != ind ) continue;
+                if (end<=start) continue;
+                
+                for(int m = 0; m<32; m++){
+                    int k = Wid*32 + m;
+                    if (k < start | end<=k)continue;
+                    //int j = hash[k+nElem];
+                    //if (hash[k]!=h)printf("H");
+                    int j = k;
+                    if (i==j)continue;
+                    float dx,dy,dz,r2,r2i,r06i,r12i,fc,fx,fy,fz;
+                    float qx,qy,qz;
+
+                    qx = smem[(sdx-wdx+m)*3+0];
+                    qy = smem[(sdx-wdx+m)*3+1];
+                    qz = smem[(sdx-wdx+m)*3+2];
+                          
+                    dx = px-qx;
+                    dy = py-qy;
+                    dz = pz-qz;
+                    if(dx<-length/2) dx+=length;
+                    if(dx> length/2) dx-=length;
+                    if(dy<-length/2) dy+=length;
+                    if(dy> length/2) dy-=length;
+                    if(dz<-length/2) dz+=length;
+                    if(dz> length/2) dz-=length;
+                    if (c==13 & dx>hL*3)printf("G");
+                    if (getHash(qx,qy,qz,gC,hL)!=h)printf("E");
+                    r2 = dx*dx+dy*dy+dz*dz;
+                    r2i = 1.0f/r2;
+                    r06i = r2i * r2i * r2i;
+                    r12i = r06i * r06i;
+                    potential += (ce12 * r12i - ce06 * r06i);
+                    fc = (cf12*r12i-cf06*r06i)*r2i;
+                    fx = fc * dx;
+                    fy = fc * dy;
+                    fz = fc * dz;
+                    t_fx+=fx;
+                    t_fy+=fy;
+                    t_fz+=fz;
+                }
+            } 
+/*
             for (int k=start;k<end;k++){
                 //int j = hash[k+nElem];
                 //if (hash[k]!=h)printf("H");
@@ -425,7 +497,10 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
                 t_fy+=fy;
                 t_fz+=fz;
             }
+            */
         }
+    }
+  
         
     d_fx[i]=t_fx;
     d_fy[i]=t_fy;
@@ -503,7 +578,7 @@ void CalculateForce_UseGPU(float *&d_f,float* &d_p,float * &d_v,float* &d_p2,flo
     CHECK(cudaGetLastError());
     
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
-    CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL,wbl.d_pot);
+    CalculateForce_GPUSort<<<grid,block,block.x*sizeof(float)*3>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL,wbl.d_pot);
     //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
     
     cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
