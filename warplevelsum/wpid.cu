@@ -6,12 +6,12 @@
 #include "common/common_vc.h"
 
 
-__global__ void warpLevelSum(float* s,float *t){
+__global__ void warpLevelSum(int* s,int *t){
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     int sd = threadIdx.x;
     int wd = sd%32;
     
-    float tmp,swp;
+    int tmp,swp;
     tmp = s[id];
     tmp = tmp != __shfl_down(tmp,1) ? 1 : 0;
     
@@ -38,9 +38,12 @@ void initRand(){
     srand((unsigned) time(nullptr));
 }
 
-void initHBuf(float *buf,int nElem){
+void initHBuf(int *buf,int nElem){
+    int h = 0;
     for (int i=0;i<nElem;i++){
-        buf[i]=((i*13)%7+(i*17)%5)%2 ;
+        int j = 323322 + i;
+        h=((j*13)%7+(h*17)%5)%2 ;
+        buf[i]=h;
     }
 }
 
@@ -50,11 +53,11 @@ int main(int argc,char** argv){
     int nElem = 1024*1024;
     size_t nByte = nElem * sizeof(float);
     
-    float *h_s,*h_t;
-    float *d_s,*d_t;
+    int *h_s,*h_t;
+    int *d_s,*d_t;
     
-    h_s = (float*)malloc(nByte);
-    h_t = (float*)malloc(nByte);
+    h_s = (int*)malloc(nByte);
+    h_t = (int*)malloc(nByte);
     
     cudaMalloc(&d_s,nByte);
     cudaMalloc(&d_t,nByte);
@@ -65,7 +68,7 @@ int main(int argc,char** argv){
     cudaMemcpy(h_t,d_t,nByte,cudaMemcpyDeviceToHost);
     
     for (int i=0;i<1024;i++){
-        //printf("%f,%f\n",h_s[i],h_t[i]);
+        printf("%d,%d\n",h_s[i],h_t[i]);
     }
     
     free(h_s);

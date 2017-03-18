@@ -29,12 +29,12 @@ void display(void)
  glMatrixMode(GL_PROJECTION);
  glLoadIdentity();
  //視野角,アスペクト比(ウィンドウの幅/高さ),描画する範囲(最も近い距離,最も遠い距離)
- gluPerspective(90.0, (double)Width / (double)Height, 1.0, 1000.0);
+ gluPerspective(60.0, (double)Width / (double)Height, 1.0, 1000.0);
  glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
  //視点の設定
- gluLookAt(-10.0,-10.0,-10.0, //カメラの座標
-      0.0,0.0,0.0, // 注視点の座標
+ gluLookAt(20.0,-20.0,-20.0, //カメラの座標
+      20.0,20.0,20.0, // 注視点の座標
      0.0,1.0,0.0); // 画面の上方向を指すベクトル
  //ライトの設定
  glLightfv(GL_LIGHT0, GL_POSITION, lightpos);
