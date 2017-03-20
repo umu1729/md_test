@@ -299,6 +299,7 @@ __device__ inline float blockLevelSum(float *smem){//only for 2^n (2^n>32)
     tmp += __shfl_xor(tmp,16);
     
     if (wdx == 0) smem[sdx] = tmp;
+    __syncthreads();
     
     //blocklevel
     for (int i=5;(1<<(i+1))<=bDim;i++){
@@ -318,13 +319,48 @@ __device__ inline float blockLevelSum(float *smem){//only for 2^n (2^n>32)
     return smem[0];
 }
 
+
+__device__ double __atomicAdd(double* address, double val)
+{
+  unsigned long long int* address_as_ull =
+    (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull, assumed;
+  do {
+    assumed = old;
+    old = atomicCAS(address_as_ull, assumed,
+		    __double_as_longlong(val +
+					 __longlong_as_double(assumed)));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+}
+
 __global__ void CalculateSumOfPotential(float *potential,SystemInfo *sysInfo){
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     int sdx = threadIdx.x;
-    int wdx = threadIdx.x % 32;
+    //int wdx = threadIdx.x % 32;
     
     extern __shared__ float smem[];
-    blockLevelSum()
+    smem[sdx] = potential[idx];
+    __syncthreads();
+    
+    double sum = (double)blockLevelSum(smem);
+    if (sdx==0)__atomicAdd(&(sysInfo->sumPotential),sum/2);
+    //２体間ポテンシャルをダブルでカウントしてしまっているため２で割る！！
+}
+
+__global__ void CalculateSumOfKinetic(float *velocity,SystemInfo *sysInfo){
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int sdx = threadIdx.x;
+    //int wdx = threadIdx.x % 32;
+    
+    extern __shared__ float smem[];
+    float tmp = velocity[idx];
+    smem[sdx] = tmp * tmp;
+    __syncthreads();
+    
+    double sum = (double)blockLevelSum(smem);
+    if (sdx==0)__atomicAdd(&(sysInfo->sumKinetic),sum/2);
+    //運動エネルギー計算の係数が1/2なので２で割る！！
 }
 
 #define HSF 6//hash size = 1<<HSF
@@ -695,7 +731,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     float dt = 0.005;
 
     
-    h_sysInfo->Lx = length * 1.5f;
+    h_sysInfo->Lx = length * 1.1f;
     h_sysInfo->Ly = length * 1.0f;
     h_sysInfo->Lz = length * 1.0f;
     h_sysInfo->dt = dt;
@@ -709,7 +745,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_sysInfo,wbl);
 
     int it = 0;
-    while(true & it < 1000000000){
+    while(true & it < 10*400){
     
         
         dim3 block(256);
@@ -719,30 +755,39 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         UpdateDifferentialMomentum<<<grid,block>>>(d_f,d_v,nElem,dt);
         cudaDeviceSynchronize();
         
+        //Calculation KineticEnergy
+        h_sysInfo->sumKinetic = 0.0;
+        cudaMemcpy(d_sysInfo,h_sysInfo,sizeof(SystemInfo),cudaMemcpyHostToDevice);
+        CalculateSumOfKinetic<<<nElem*3/1024,1024,1024*sizeof(float)>>>(d_v,d_sysInfo);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_sysInfo,d_sysInfo,sizeof(SystemInfo),cudaMemcpyDeviceToHost);
+        
+        
         UpdateDifferentialPosition<<<grid,block>>>(d_p,d_v,nElem,dt,d_sysInfo);
         cudaDeviceSynchronize();
         
         CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_sysInfo,wbl);
         cudaDeviceSynchronize();
-    
+        
+        h_sysInfo->sumPotential = 0.0;
+        cudaMemcpy(d_sysInfo,h_sysInfo,sizeof(SystemInfo),cudaMemcpyHostToDevice);
+        CalculateSumOfPotential<<<nElem/1024,1024,1024*sizeof(float)>>>(d_pot,d_sysInfo);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_sysInfo,d_sysInfo,sizeof(SystemInfo),cudaMemcpyDeviceToHost);
+       
         UpdateDifferentialMomentum<<<grid,block>>>(d_f,d_v,nElem*3,dt);       
         cudaDeviceSynchronize();
         
         //Graphics Functon(External) :transfer postion buffer to graphics function;
-        if (it%100==0) {;//20ステップに１回表示：粒子数が多いと表示で律速するので．
-           
-           (*grpc)(h_v3pos);
+        if (it%20==0) {;//20ステップに１回表示：粒子数が多いと表示で律速するので．
            
             cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
             cudaMemcpy(wbl.h_p,d_p,nBytes*3,cudaMemcpyDeviceToHost);
             cudaMemcpy(wbl.h_v,d_v,nBytes*3,cudaMemcpyDeviceToHost);            
-            double potential = 0;
-            for (int i=0;i<nElem;i++){
-                potential += h_pot[i];
-            }
-            potential /=2.;
             
-            CalculateHamiltonian(h_p,h_v,nElem,potential);
+            (*grpc)(h_v3pos);
+                      
+            printf("%lf,%lf,%lf:gpu\n",h_sysInfo->sumPotential+h_sysInfo->sumKinetic,h_sysInfo->sumPotential,h_sysInfo->sumKinetic);
             printf("it:%d\n",it);
         }
         

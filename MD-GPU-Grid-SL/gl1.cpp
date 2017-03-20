@@ -1,11 +1,12 @@
 //#pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
 #include "GL/freeglut.h"
-#include <string.h>
 #include "cuHeader.h"
 #include <stdio.h>
+#include <string>       // ヘッダファイルインクルード
+using namespace std;         //  名前空間指定
 
-#define WIDTH (640*2)
-#define HEIGHT (360*2)
+#define WIDTH (640)
+#define HEIGHT (360)
 
 int Width;
 int Height;
@@ -20,6 +21,7 @@ GLfloat lightpos[] = { -200.0, -150.0, -500.0, 1.0 };
 
 
 V3Buf v3Buf;
+int pctCount = 0;
 
 void display(void)
 {
@@ -33,7 +35,7 @@ void display(void)
  glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
  //視点の設定
- gluLookAt(20.0,-20.0,-20.0, //カメラの座標
+ gluLookAt(15.0,-15.0,-15.0, //カメラの座標
       20.0,20.0,20.0, // 注視点の座標
      0.0,1.0,0.0); // 画面の上方向を指すベクトル
  //ライトの設定
@@ -47,6 +49,23 @@ void display(void)
         glutSolidSphere(0.3,4,4);
         glPopMatrix();
     }
+ 
+ 
+    size_t bufSize= Width * Height * 4 ;
+    unsigned char *imgBuf = (unsigned char*)malloc(bufSize);
+    glReadPixels(0, 0, Width, Height, GL_RGBA, GL_UNSIGNED_BYTE, imgBuf);
+    
+    pctCount++;
+    FILE *fp;
+    string str("rawImages/rawImage_s");
+    str += to_string(pctCount);
+    str += ".rawdata";
+    fp = fopen(str.c_str(),"wb");
+    printf("size:%d\n",(int)bufSize);
+    fwrite(imgBuf, 1, bufSize, fp); 
+    fclose(fp);
+    free(imgBuf);
+    
  glutSwapBuffers();
 }
 void idle(void)
