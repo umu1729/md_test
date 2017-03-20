@@ -11,6 +11,20 @@ void initRand(){
     srand((unsigned) time(&t));
 }
 
+typedef struct{
+    float Lx;
+    float Ly;
+    float Lz;
+    int gCx;
+    int gCy;
+    int gCz;
+    float hLx;
+    float hLy;
+    float hLz;
+    float dt;
+    int nElem;
+}SystemInfo;
+
 /// using malloced nElem*3*sizeof(float) buffer,write uniform particles postiion.
 /// and Mold buffer pointer to V3Buf
 /// nElem must be 4(k)^3 !!! now Implemention is nElem == 256
@@ -227,22 +241,54 @@ void CalculateForce_UseGPU_Naive(float* h_p,float *h_f,float* d_p,float *d_f,int
     cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
 }
 
+
+__global__ void UpdateDifferentialMomentum(float *f,float *v,int nElem,float dt){
+ 
+    int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
+    
+    float tmp = v[idx];
+    tmp += dt*0.5f*f[idx];
+    v[idx] = tmp;
+ 
+ 
+ /*
+         for (int i=0;i<nElem*3;i++){
+            h_v[i]+=dt*0.5*h_f[i];
+        }
+        */   
+}
+
+__global__ void UpdateDifferentialPosition(float *p,float *v,int nElem,float dt,float length){
+
+    int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
+
+    float tmp = p[idx];
+    tmp+=dt*v[idx];
+    tmp = tmp- floorf(tmp/length)*length;
+    p[idx] = tmp;
+
+/*
+            float p = h_p[i];
+            p+=dt*h_v[i];
+            p = p- floorf(p/length)*length;
+            h_p[i] = p;*/
+}
+
 #define HSF 6//hash size = 1<<HSF
 
-__host__ __device__ inline int getHashPart(float v,int gC,float hL){
-    return (int)floorf(v/hL);
+__host__ __device__ inline int getHashPart(float v,SystemInfo sysInfo){
+    float hLx = sysInfo.hLx;
+    return (int)floorf(v/hLx);
 }
 
 __host__ __device__ inline int HashParts2Hash(int Hx,int Hy,int Hz){
     return Hx + Hy*(1<<HSF) + Hz*(1<<(2*HSF)); //this implemention uses gC < (1<<HSF);
 }
 
-__host__ __device__ inline int getHash(float x,float y,float z,int gC,float hL){
-    // gC is grid Count(1dim) 
-    // hL is grid Length(one grid,1dim)
-    int Hx = getHashPart(x,gC,hL); //!!! if x == hL * gC ,it cause error!!!
-    int Hy = getHashPart(y,gC,hL);
-    int Hz = getHashPart(z,gC,hL);
+__host__ __device__ inline int getHash(float x,float y,float z,SystemInfo sysInfo){
+    int Hx = getHashPart(x,sysInfo); //!!! if x == hL * gC ,it cause error!!!
+    int Hy = getHashPart(y,sysInfo);
+    int Hz = getHashPart(z,sysInfo);
     return HashParts2Hash(Hx,Hy,Hz);
 }
 
@@ -250,12 +296,13 @@ __host__ __device__ inline void recoverHash(int hash,int &x,int &y,int &z){
     //Not Implement;
 }
 
-__global__ void HashFromPosition(float *d_p,int *d_hash,int nElem,int gC,float hL){
+__global__ void HashFromPosition(float *d_p,int *d_hash,SystemInfo *sysInfo){
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int nElem = sysInfo->nElem;
     float x = d_p[idx];
     float y = d_p[nElem+idx];
     float z = d_p[2*nElem+idx];
-    int h = getHash(x,y,z,gC,hL);
+    int h = getHash(x,y,z,*sysInfo);
     d_hash[idx] = h;
     d_hash[idx+nElem] = idx; //it's key;
 }
@@ -279,8 +326,46 @@ __global__ void GenerateHRRM(int *d_hash,int *d_HRRM,int nElem){
     }
 }
 
-__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *hash,int nElem,float length,int gC,float hL,float *d_pot){
+__global__ void AlignMemory(float *t,float *s,int *key,int nElem){
     int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
+    t[idx] = s[key[idx]];
+}
+
+__device__ inline void warpLevelIndex(int* s,int *t){
+    int sd = threadIdx.x;
+    int wd = sd%32;
+    
+    int tmp,swp;
+    tmp = *s;
+    tmp = tmp != __shfl_down(tmp,1) ? 1 : 0;
+    
+    for (int i=0;i<5;i++){
+        int p2 = 1<<i;
+        int pp2= p2<<1;
+        swp = __shfl_xor(tmp,p2);
+        tmp +=( wd%pp2 == pp2 -1 )? swp : 0;
+    }
+    tmp = wd%32 == 31 ? 0 : tmp;
+    
+    for (int i=4;i>=0;i--){
+        int p2 = 1<<i;
+        int pp2= p2<<1;
+        swp = __shfl_xor(tmp,p2);
+        tmp = wd%pp2 == pp2 - p2 - 1 ? swp : tmp;
+        tmp += wd%pp2 == pp2 - 1 ? swp : 0;
+    }
+    
+    *t = tmp;
+}
+
+__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,SystemInfo *sysInfo,float *d_pot){
+    int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
+    int sdx = threadIdx.x;
+    int wdx = sdx%32;
+    int nElem = sysInfo->nElem;
+    float length = sysInfo->Lx;
+    int gC = sysInfo->gCx;
+    float hL = sysInfo->hLx;
     float *d_fx,*d_fy,*d_fz,*d_px,*d_py,*d_pz;
     d_fx = force;
     d_fy = d_fx + nElem;
@@ -288,6 +373,10 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
     d_px = pos;
     d_py = d_px + nElem;
     d_pz = d_py + nElem;
+
+        
+    extern __shared__ float smem[];
+    
     
     //SYOKIKA
     float t_fx=0.0f,t_fy=0.0f,t_fz=0.0f;
@@ -306,10 +395,20 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
     float px = d_px[i];
     float py = d_py[i];
     float pz = d_pz[i];
-    int Hx = getHashPart(px,gC,hL);
-    int Hy = getHashPart(py,gC,hL);
-    int Hz = getHashPart(pz,gC,hL);
+    int Hx = getHashPart(px,*sysInfo);
+    int Hy = getHashPart(py,*sysInfo);
+    int Hz = getHashPart(pz,*sysInfo);
+    int Hh = HashParts2Hash(Hx,Hy,Hz);
     int nHash = 1<<(HSF*3);
+    
+    int hid;
+    warpLevelIndex(&Hh,&hid);
+    
+    //if (blockIdx.x == 30 & threadIdx.x/32 == 0)printf("<%d,%d>",threadIdx.x,hid);
+    
+    bool warpSync = __all(hid == 0);
+    //if (threadIdx.x%32 == 31 & warpSync )printf("[!]");
+    
     
     for (int c=0;c<27;c++){
         int dHx = c%3-1;
@@ -324,8 +423,9 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
         if(!(start<=end & end-start<1000000)){printf("D");};
         
         for (int k=start;k<end;k++){
-            int j = hash[k+nElem];
-            if (hash[k]!=h)printf("H");
+            //int j = hash[k+nElem];
+            //if (hash[k]!=h)printf("H");
+            int j = (k)%(end-start) + start;
             if (i==j)continue;
             float dx,dy,dz,r2,r2i,r06i,r12i,fc,fx,fy,fz;
             float qx,qy,qz;
@@ -342,7 +442,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
             if(dz<-length/2) dz+=length;
             if(dz> length/2) dz-=length;
             if (c==13 & dx>hL*3)printf("G");
-            if (getHash(qx,qy,qz,gC,hL)!=h)printf("E");
+            if (getHash(qx,qy,qz,*sysInfo)!=h)printf("E");
             r2 = dx*dx+dy*dy+dz*dz;
             r2i = 1.0f/r2;
             r06i = r2i * r2i * r2i;
@@ -355,16 +455,18 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,int *ha
             t_fx+=fx;
             t_fy+=fy;
             t_fz+=fz;
-        }
+        }        
+        
     }
-    
+        
     d_fx[i]=t_fx;
     d_fy[i]=t_fy;
     d_fz[i]=t_fz;
     d_pot[i]=potential;
 }
 
-typedef struct{
+//規約　引数渡しとしては使わない．only for「WorkBuffer」
+typedef struct{ //CPU level struct
     float * h_pot;
     float * d_pot;
     int *d_HashKey; //nElem * 2 (pair of hash and key);
@@ -373,39 +475,46 @@ typedef struct{
     int *h_HashKeyTest;//TestBuf
     int *h_HRRMTest;
     float *h_nElemF;
+    float *h_f;
+    float *h_p;
+    float *h_v;
+    SystemInfo *h_sysInfo;
 } WorkBufList;
 
 
-void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem,float length,WorkBufList wbl){
+void CalculateForce_UseGPU(float *&d_f,float* &d_p,float * &d_v,float* &d_p2,float * &d_v2,SystemInfo *d_sysInfo,WorkBufList wbl){
+    cudaMemcpy(wbl.h_sysInfo,d_sysInfo,sizeof(SystemInfo),cudaMemcpyDeviceToHost);
+    
+    int nElem = wbl.h_sysInfo->nElem;
+    float Lx = wbl.h_sysInfo->Lx;
     float cutRadius = 4.0f;
-    int gC = floor(length/cutRadius); //grid Size(1dim)
-    float hL = length/gC; //cutRadius
+    int gCx = floor(Lx/cutRadius); //grid Size(1dim)
+    float hLx = Lx/gCx; //cutRadius
     int nHash = 1<<(HSF*3);
     int nBytes = nElem * sizeof(float);
     
-    cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
+    wbl.h_sysInfo-> gCx = gCx;
+    wbl.h_sysInfo-> hLx = hLx;
+    cudaMemcpy(d_sysInfo,wbl.h_sysInfo,sizeof(SystemInfo),cudaMemcpyHostToDevice);
     
     
-    dim3 block(256);
+    dim3 block(128);
     dim3 grid(nElem/block.x);
     //printf("G<%d>",grid.x);
     
     CHECK(cudaGetLastError());
 
     //Kernel:Hashing (Generate Hash And Embed key)
-    HashFromPosition<<<grid,block>>>(d_p,wbl.d_HashKey,nElem,gC,hL);
+    HashFromPosition<<<grid,block>>>(d_p,wbl.d_HashKey,d_sysInfo);
     cudaDeviceSynchronize();
     
     CHECK(cudaGetLastError());
 
 
-
-    
     //Kernel:Sort Key based on Hash.
     int nLog2Elem = (int)log2f((float)(nElem)+0.1f);
     //printf ("%d",nLog2Elem);
     sort(wbl.d_HashKey,wbl.d_HashKeyWork,nLog2Elem); //TYUI! secound parameter is for only work buffer(x:in-out,o:in&out-work)
- 
     
     CHECK(cudaGetLastError());
     
@@ -416,22 +525,37 @@ void CalculateForce_UseGPU(float* h_p,float *h_f,float* d_p,float *d_f,int nElem
     
     CHECK(cudaGetLastError());
     
-    cudaMemcpy(wbl.h_HRRMTest,wbl.d_HRRM,nHash*2*sizeof(int),cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
-    cudaMemcpy(wbl.h_nElemF,d_p,nBytes*3,cudaMemcpyDeviceToHost);
-    
 
-    
-    //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
-    CalculateForce_GPUSort<<<grid,block>>>(d_f,d_p,wbl.d_HRRM,wbl.d_HashKey,nElem,length,gC,hL,wbl.d_pot);
-    //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
-    
-    cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
+    AlignMemory<<<grid,block>>>(d_p2+nElem*0,d_p+nElem*0,wbl.d_HashKey+nElem,nElem);
+    AlignMemory<<<grid,block>>>(d_p2+nElem*1,d_p+nElem*1,wbl.d_HashKey+nElem,nElem);
+    AlignMemory<<<grid,block>>>(d_p2+nElem*2,d_p+nElem*2,wbl.d_HashKey+nElem,nElem);
+    AlignMemory<<<grid,block>>>(d_v2+nElem*0,d_v+nElem*0,wbl.d_HashKey+nElem,nElem);
+    AlignMemory<<<grid,block>>>(d_v2+nElem*1,d_v+nElem*1,wbl.d_HashKey+nElem,nElem);
+    AlignMemory<<<grid,block>>>(d_v2+nElem*2,d_v+nElem*2,wbl.d_HashKey+nElem,nElem);
+    SwapFloatPointer(&d_p,&d_p2);
+    SwapFloatPointer(&d_v,&d_v2);
+    cudaDeviceSynchronize();
     
     CHECK(cudaGetLastError());
     
-    cudaMemcpy(h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
+    //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
+    CalculateForce_GPUSort<<<grid,block,block.x*sizeof(float)*3>>>(d_f,d_p,wbl.d_HRRM,d_sysInfo,wbl.d_pot);
+    //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
     
+   
+    
+    CHECK(cudaGetLastError());
+    
+    /*
+    cudaMemcpy(wbl.h_HRRMTest,wbl.d_HRRM,nHash*2*sizeof(int),cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_HashKeyTest,wbl.d_HashKey,nElem*2*sizeof(int),cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_nElemF,d_p,nBytes*3,cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_f,d_f,nBytes*3,cudaMemcpyDeviceToHost);
+    
+    cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_p,d_p,nBytes*3,cudaMemcpyDeviceToHost);
+    cudaMemcpy(wbl.h_v,d_v,nBytes*3,cudaMemcpyDeviceToHost);
+    */
     CHECK(cudaGetLastError());
 
 }
@@ -444,82 +568,109 @@ void cuMain(void (*grpc)(V3Buf buf) ){
 
     int nElem = 256*8*8*8;
     int nBytes = nElem * sizeof(float);
-    float *h_p,*h_v,*h_f,*h_fd,*h_pot;
+    float *h_p,*h_v,*h_f,*h_pot;
+    SystemInfo *h_sysInfo;
     h_p = (float*)malloc(nBytes*3);
     h_v = (float*)malloc(nBytes*3);
     h_f = (float*)malloc(nBytes*3);
-    h_fd= (float*)malloc(nBytes*3);
     h_pot = (float*)malloc(nBytes);
+    h_sysInfo = (SystemInfo*)malloc(sizeof(SystemInfo));
 
     //Buffer Initialization (GPU)
-    float *d_p,*d_f,*d_pot;
+    float *d_p,*d_f,*d_pot,*d_v,*d_p2,*d_v2;
     int *d_HashKeyIn,*d_HashKeyOut,*d_HRRM;
+    SystemInfo *d_sysInfo;
     cudaMalloc(&d_p,nBytes*3);
     cudaMalloc(&d_f,nBytes*3);
+    cudaMalloc(&d_v,nBytes*3);
     cudaMalloc(&d_HashKeyIn,nElem*2*sizeof(int));
     cudaMalloc(&d_HashKeyOut,nElem*2*sizeof(int));
     cudaMalloc(&d_HRRM,(1<<(HSF*3))*2*sizeof(int));//HRRM size is determined by HashMax * 2
     cudaMalloc(&d_pot,nBytes);
+    cudaMalloc(&d_p2,nBytes*3);
+    cudaMalloc(&d_v2,nBytes*3);
+    cudaMalloc((void**)&d_sysInfo,sizeof(SystemInfo));
     float *h_df; //Test Buf;
     int *h_dh,*h_d_HRRM; // Test Buf;
     h_df = (float *)malloc(nBytes*3);
     h_dh = (int *)malloc(nElem*2*sizeof(int));
     h_d_HRRM = (int *)malloc((1<<(HSF*3))*2*sizeof(int));
 
-    WorkBufList wbl = {h_pot,d_pot,d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df};
+    WorkBufList wbl = 
+        {h_pot,d_pot,d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df,h_f,h_p,h_v,h_sysInfo};
 
     //Buffer Setting
 
     float length;
-    V3Buf h_v3pos = CreateUniformParticles(h_p,0.5f,nElem,&length);
+    V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
+    
+    length *= 1;
     
     printf("length%f\n",length);
     
     for (int i=0;i<nElem*3;i++){
         //h_v[i]*=10.0f;
         h_v[i]=(float)((i*7)%13)/13.0f*2.0f-1.0f;
-        h_v[i]*=2.0f;
+        h_v[i]*=3.0f;
     }
 
-    double potential;
-    CalculateForce_UseGPU_Naive(h_p,h_f,d_p,d_f,nElem,length);
 
     float dt = 0.005;
-    int it = 0;
-    while(true){
+
     
+    h_sysInfo->Lx = length;
+    h_sysInfo->Ly = length;
+    h_sysInfo->Lz = length;
+    h_sysInfo->dt = dt;
+    h_sysInfo->nElem = nElem;
+    cudaMemcpy(d_sysInfo,h_sysInfo,sizeof(SystemInfo),cudaMemcpyHostToDevice);    
+    
+    
+    cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v,h_v,nBytes*3,cudaMemcpyHostToDevice);
+    
+    CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_sysInfo,wbl);
+
+    int it = 0;
+    while(true & it < 1000){
+    
+        
+        dim3 block(256);
+        dim3 grid(nElem*3/block.x);
+        
+       
+        UpdateDifferentialMomentum<<<grid,block>>>(d_f,d_v,nElem,dt);
+        cudaDeviceSynchronize();
+        
+        UpdateDifferentialPosition<<<grid,block>>>(d_p,d_v,nElem,dt,length);
+        cudaDeviceSynchronize();
+        
+        CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_sysInfo,wbl);
+        cudaDeviceSynchronize();
+    
+        UpdateDifferentialMomentum<<<grid,block>>>(d_f,d_v,nElem*3,dt);       
+        cudaDeviceSynchronize();
+        
         //Graphics Functon(External) :transfer postion buffer to graphics function;
-        if (it%20==19) (*grpc)(h_v3pos);//20ステップに１回表示：粒子数が多いと表示で律速するので．
-        
-        //Position Update
-        for (int i=0;i<nElem*3;i++){
-            float p = h_p[i];
-            p+=dt*(h_v[i]+0.5f*dt*h_f[i]);
-            p = p- floorf(p/length)*length;
-            h_p[i] = p;
+        if (it%20==0) {;//20ステップに１回表示：粒子数が多いと表示で律速するので．
+           
+           (*grpc)(h_v3pos);
+           
+            cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
+            cudaMemcpy(wbl.h_p,d_p,nBytes*3,cudaMemcpyDeviceToHost);
+            cudaMemcpy(wbl.h_v,d_v,nBytes*3,cudaMemcpyDeviceToHost);            
+            double potential = 0;
+            for (int i=0;i<nElem;i++){
+                potential += h_pot[i];
+            }
+            potential /=2.;
+            
+            CalculateHamiltonian(h_p,h_v,nElem,potential);
+            printf("it:%d\n",it);
         }
         
-        //Force buffer becomes old because of position updated.
-        SwapFloatPointer(&h_f,&h_fd);
         
-        //CalculateForce_UseGPU_Naive(h_p,h_f,d_p,d_f,nElem,length);
-        
-        CalculateForce_UseGPU(h_p,h_f,d_p,d_f,nElem,length,wbl);
-        
-        for (int i=0;i<nElem*3;i++){
-            h_v[i]+=dt*0.5*(h_f[i]+h_fd[i]);
-        }
-        
-        //printf("%f",h_p[1000]);
-        
-        potential = 0;
-        for (int i=0;i<nElem;i++){
-            potential += h_pot[i];
-        }
-        potential /=2.;
-        
-        CalculateHamiltonian(h_p,h_v,nElem,potential);
         
         it++;
     }

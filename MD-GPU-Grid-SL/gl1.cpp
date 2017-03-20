@@ -44,7 +44,7 @@ void display(void)
     for (int i=0;i<v3Buf.nElem;i++){
         glPushMatrix();
         glTranslatef((v3Buf.xBuf)[i],(v3Buf.yBuf)[i],(v3Buf.zBuf)[i]);
-        glutSolidSphere(0.3,12,12);
+        glutSolidSphere(0.3,4,4);
         glPopMatrix();
     }
  glutSwapBuffers();
