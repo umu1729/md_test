@@ -25,6 +25,7 @@ typedef struct{
     int nElem;
     double sumPotential;
     double sumKinetic;
+    double sumForceDotPos;
 }SystemInfo;
 
 /// using malloced nElem*3*sizeof(float) buffer,write uniform particles postiion.
@@ -348,6 +349,20 @@ __global__ void CalculateSumOfPotential(float *potential,SystemInfo *sysInfo){
     //２体間ポテンシャルをダブルでカウントしてしまっているため２で割る！！
 }
 
+__global__ void CalculateSumOfForceDotPos(float *fdp,SystemInfo *sysInfo){
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int sdx = threadIdx.x;
+    //int wdx = threadIdx.x % 32;
+    
+    extern __shared__ float smem[];
+    smem[sdx] = fdp[idx];
+    __syncthreads();
+    
+    double sum = (double)blockLevelSum(smem);
+    if (sdx==0)__atomicAdd(&(sysInfo->sumForceDotPos),sum/2);
+    //２体間ポテンシャルをダブルでカウントしてしまっているため２で割る！！
+}
+
 __global__ void CalculateSumOfKinetic(float *velocity,SystemInfo *sysInfo){
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     int sdx = threadIdx.x;
@@ -457,7 +472,7 @@ __device__ inline void warpLevelIndex(int* s,int *t){
     *t = tmp;
 }
 
-__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,SystemInfo *sysInfo,float *d_pot){
+__global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,SystemInfo *sysInfo,float *d_pot,float *d_fdp){
     int idx = threadIdx.x + blockIdx.x * blockDim.x; //1dim grid ,1im block
     int sdx = threadIdx.x;
     int wdx = sdx%32;
@@ -484,6 +499,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,SystemI
     float t_fx=0.0f,t_fy=0.0f,t_fz=0.0f;
     
     double potential = 0.0;// must implement to calculate Hamiltoniam...
+    double forceDotPos = 0.0;// must implement to calculate Pressure...
     
     //Is it better to load this constants from ConstantMemory?
     float eps = 1.0f;
@@ -554,6 +570,7 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,SystemI
             fx = fc * dx;
             fy = fc * dy;
             fz = fc * dz;
+            forceDotPos += fx * dx + fy * dy + fz * dz;
             t_fx+=fx;
             t_fy+=fy;
             t_fz+=fz;
@@ -565,12 +582,12 @@ __global__ void CalculateForce_GPUSort(float *force,float *pos,int* hrrm,SystemI
     d_fy[i]=t_fy;
     d_fz[i]=t_fz;
     d_pot[i]=potential;
+    d_fdp[i]= forceDotPos;
 }
 
 //規約　引数渡しとしては使わない．only for「WorkBuffer」
 typedef struct{ //CPU level struct
     float * h_pot;
-    float * d_pot;
     int *d_HashKey; //nElem * 2 (pair of hash and key);
     int *d_HashKeyWork;
     int *d_HRRM;//?
@@ -584,7 +601,7 @@ typedef struct{ //CPU level struct
 } WorkBufList;
 
 
-void CalculateForce_UseGPU(float *&d_f,float* &d_p,float * &d_v,float* &d_p2,float * &d_v2,SystemInfo *d_sysInfo,WorkBufList wbl){
+void CalculateForce_UseGPU(float *&d_f,float* &d_p,float * &d_v,float* &d_p2,float * &d_v2,float* &d_pot,float* &d_fdp,SystemInfo *d_sysInfo,WorkBufList wbl){
     cudaMemcpy(wbl.h_sysInfo,d_sysInfo,sizeof(SystemInfo),cudaMemcpyDeviceToHost);
     
     int nElem = wbl.h_sysInfo->nElem;
@@ -651,7 +668,7 @@ void CalculateForce_UseGPU(float *&d_f,float* &d_p,float * &d_v,float* &d_p2,flo
     CHECK(cudaGetLastError());
     
     //Kernel:using Non-Aligned data and HRRM and Sorted Key-Hash,calculate Force fast.
-    CalculateForce_GPUSort<<<grid,block,block.x*sizeof(float)*3>>>(d_f,d_p,wbl.d_HRRM,d_sysInfo,wbl.d_pot);
+    CalculateForce_GPUSort<<<grid,block,block.x*sizeof(float)*3>>>(d_f,d_p,wbl.d_HRRM,d_sysInfo,d_pot,d_fdp);
     //CalculateForce_GPUNaive<<<grid,block>>>(d_f,d_p,nElem,length);
     
    
@@ -678,7 +695,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     
     //Buffer Initialization (CPU)
 
-    int nElem = 256*8*8;
+    int nElem = 256*8;
     int nBytes = nElem * sizeof(float);
     float *h_p,*h_v,*h_f,*h_pot;
     SystemInfo *h_sysInfo;
@@ -689,7 +706,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     h_sysInfo = (SystemInfo*)malloc(sizeof(SystemInfo));
 
     //Buffer Initialization (GPU)
-    float *d_p,*d_f,*d_pot,*d_v,*d_p2,*d_v2;
+    float *d_p,*d_f,*d_pot,*d_v,*d_p2,*d_v2,*d_fdp;
     int *d_HashKeyIn,*d_HashKeyOut,*d_HRRM;
     SystemInfo *d_sysInfo;
     cudaMalloc(&d_p,nBytes*3);
@@ -701,6 +718,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     cudaMalloc(&d_pot,nBytes);
     cudaMalloc(&d_p2,nBytes*3);
     cudaMalloc(&d_v2,nBytes*3);
+    cudaMalloc(&d_fdp,nBytes);
     cudaMalloc((void**)&d_sysInfo,sizeof(SystemInfo));
     float *h_df; //Test Buf;
     int *h_dh,*h_d_HRRM; // Test Buf;
@@ -709,11 +727,12 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     h_d_HRRM = (int *)malloc((1<<(HSF*3))*2*sizeof(int));
 
     WorkBufList wbl = 
-        {h_pot,d_pot,d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df,h_f,h_p,h_v,h_sysInfo};
+        {h_pot,d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df,h_f,h_p,h_v,h_sysInfo};
 
     //Buffer Setting
 
     float length;
+    //V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
     
@@ -724,14 +743,14 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     for (int i=0;i<nElem*3;i++){
         //h_v[i]*=10.0f;
         h_v[i]=(float)((i*7)%13)/13.0f*2.0f-1.0f;
-        h_v[i]*=2.3f;
+        h_v[i]*=3.2f;//2.3f;
     }
 
 
     float dt = 0.005;
 
     
-    h_sysInfo->Lx = length * 1.1f;
+    h_sysInfo->Lx = length * 1.0f;//*1.1f -> L-S boundary???
     h_sysInfo->Ly = length * 1.0f;
     h_sysInfo->Lz = length * 1.0f;
     h_sysInfo->dt = dt;
@@ -742,10 +761,10 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     cudaMemcpy(d_p,h_p,nBytes*3,cudaMemcpyHostToDevice);
     cudaMemcpy(d_v,h_v,nBytes*3,cudaMemcpyHostToDevice);
     
-    CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_sysInfo,wbl);
+    CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_pot,d_fdp,d_sysInfo,wbl);
 
     int it = 0;
-    while(true & it < 10*400){
+    while(true & it < 20*300){
     
         
         dim3 block(256);
@@ -766,7 +785,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         UpdateDifferentialPosition<<<grid,block>>>(d_p,d_v,nElem,dt,d_sysInfo);
         cudaDeviceSynchronize();
         
-        CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_sysInfo,wbl);
+        CalculateForce_UseGPU(d_f,d_p,d_v,d_p2,d_v2,d_pot,d_fdp,d_sysInfo,wbl);
         cudaDeviceSynchronize();
         
         h_sysInfo->sumPotential = 0.0;
@@ -774,6 +793,14 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         CalculateSumOfPotential<<<nElem/1024,1024,1024*sizeof(float)>>>(d_pot,d_sysInfo);
         cudaDeviceSynchronize();
         cudaMemcpy(h_sysInfo,d_sysInfo,sizeof(SystemInfo),cudaMemcpyDeviceToHost);
+        
+        h_sysInfo->sumForceDotPos = 0.0;
+        cudaMemcpy(d_sysInfo,h_sysInfo,sizeof(SystemInfo),cudaMemcpyHostToDevice);
+        CalculateSumOfForceDotPos<<<nElem/1024,1024,1024*sizeof(float)>>>(d_fdp,d_sysInfo);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_sysInfo,d_sysInfo,sizeof(SystemInfo),cudaMemcpyDeviceToHost);       
+        
+        
        
         UpdateDifferentialMomentum<<<grid,block>>>(d_f,d_v,nElem*3,dt);       
         cudaDeviceSynchronize();
@@ -781,13 +808,15 @@ void cuMain(void (*grpc)(V3Buf buf) ){
         //Graphics Functon(External) :transfer postion buffer to graphics function;
         if (it%20==0) {;//20ステップに１回表示：粒子数が多いと表示で律速するので．
            
-            cudaMemcpy(wbl.h_pot,wbl.d_pot,nBytes,cudaMemcpyDeviceToHost);
+            cudaMemcpy(wbl.h_pot,d_pot,nBytes,cudaMemcpyDeviceToHost);
             cudaMemcpy(wbl.h_p,d_p,nBytes*3,cudaMemcpyDeviceToHost);
             cudaMemcpy(wbl.h_v,d_v,nBytes*3,cudaMemcpyDeviceToHost);            
             
             (*grpc)(h_v3pos);
-                      
-            printf("%lf,%lf,%lf:gpu\n",h_sysInfo->sumPotential+h_sysInfo->sumKinetic,h_sysInfo->sumPotential,h_sysInfo->sumKinetic);
+            
+            double T = h_sysInfo->sumKinetic/nElem/3;
+            double P = ( nElem * T + h_sysInfo->sumForceDotPos/3 )/( h_sysInfo->Lx * h_sysInfo->Ly * h_sysInfo->Lz);
+            printf("%lf,T=%lf,P=%lf,%lf,%lf:gpu\n",h_sysInfo->sumPotential+h_sysInfo->sumKinetic,T,P,h_sysInfo->sumPotential,h_sysInfo->sumKinetic);
             printf("it:%d\n",it);
         }
         

@@ -5,8 +5,8 @@
 #include <string>       // ヘッダファイルインクルード
 using namespace std;         //  名前空間指定
 
-#define WIDTH (640)
-#define HEIGHT (360)
+#define WIDTH (640*2)
+#define HEIGHT (360*2)
 
 int Width;
 int Height;
@@ -54,7 +54,7 @@ void display(void)
     size_t bufSize= Width * Height * 4 ;
     unsigned char *imgBuf = (unsigned char*)malloc(bufSize);
     glReadPixels(0, 0, Width, Height, GL_RGBA, GL_UNSIGNED_BYTE, imgBuf);
-    
+   /* 
     pctCount++;
     FILE *fp;
     string str("rawImages/rawImage_s");
@@ -65,7 +65,7 @@ void display(void)
     fwrite(imgBuf, 1, bufSize, fp); 
     fclose(fp);
     free(imgBuf);
-    
+    */
  glutSwapBuffers();
 }
 void idle(void)
