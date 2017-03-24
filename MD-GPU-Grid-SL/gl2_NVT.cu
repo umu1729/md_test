@@ -5,6 +5,7 @@
 #include <math.h>
 #include <cuda_runtime.h>
 #include "sortlib.h"
+#include "../serializer/serial.h"
 
 void initRand(){
     time_t t;
@@ -734,14 +735,19 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     WorkBufList wbl = 
         {h_pot,d_HashKeyIn,d_HashKeyOut,d_HRRM,h_dh,h_d_HRRM,h_df,h_f,h_p,h_v,h_sysInfo};
 
+    //SaveChunk Initialize
+    ChunkIndex ch_P = constructChunk("Pos",nBytes*3,h_p);
+    ChunkIndex* ch_list[1] = {&ch_P};
+    ChunkIndex ch_Step = groupChunk("Step",ch_list,1);
+    updateChunkInfo(ch_Step);
+    FILE *fp = fopen("rawData/test.rawdata","wb");
+
     //Buffer Setting
 
     float length;
     //V3Buf h_v3pos = CreateUniformParticles(h_p,1.0f,nElem,&length);
     V3Buf h_v3pos = CreateUniformParticles(h_p,0.42f,nElem,&length);
     V3Buf h_v3vel = CreateRandomVelocity(h_v,nElem);
-    
-    length *= 1;
     
     printf("length%f\n",length);
     
@@ -780,7 +786,7 @@ void cuMain(void (*grpc)(V3Buf buf) ){
     ////
 
     int it = 0;
-    while(true & it * dt < 3000){
+    while(true & it * dt < 3){
     
         
         dim3 block(256);
@@ -839,6 +845,9 @@ void cuMain(void (*grpc)(V3Buf buf) ){
             double P = ( T * nElem - h_sysInfo->sumForceDotPos/3.0 )/V;
             printf("%lf,T=%lf,P=%lf,rho=%lf:gpu\n",H,T,P,rho);
             printf("t:%f\n",(float)(it)*dt);
+            
+            saveChunk(fp,ch_Step);
+            printf("PARTICLE:%f,",h_p[0]);
         }
         
         
