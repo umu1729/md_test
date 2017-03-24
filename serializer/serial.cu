@@ -73,8 +73,17 @@ int main(int argc,char** argv){
     
     //出力ファイルの構造は，１つのChunkIndexごとに，Header(データの情報)とBody(データ本体)
     //が連続して書き込まれる構造になっています(Header+BodyでChunkと呼ぶことにします)．
-    //親子がないChunkIndexをsaveChunkで何度か書き込む場合は，
+    //親子がない単一のChunkIndexをsaveChunkで何度か書き込む場合は，
     //Header-Body-Header-Body-Header-Body-...という構造になっています．
+    //または，Chunk-Chunk-Chunk-...
+    //親子関係のあるChunkIndexを保存した場合は，
+    //親のBody部分に，子のChunkが埋め込まれます．
+    //parent{child}の場合は，
+    //Hp-Hc-Bc-Hp-Hc-Bc-... となります Hp:parent's header,Bc:child's header
+    //子が複数の場合は，
+    //Hp-Hc1-Bc1-Hc2-Bc2-Hp-Hc1-Bc1-Hc2-Bc2-..
+    //となります．Headerに，Bodyのサイズの情報が書き込まれているので，簡単な関数を使って
+    //子のHeaderや次のHeaderのバッファー位置を特定できます．
     
     FILE * fp= fopen("dat.txt","wb");
     printf("ch:%d\n",(int)sizeof(ChunkHeader));
@@ -82,9 +91,12 @@ int main(int argc,char** argv){
     saveChunk(fp,chk5);
     fclose(fp);
     
-    //ここからは，出力されたファイルから，
+    //ここからは，出力されたファイルから，データを復元するコードです．
     
     printf("LOAD\n");
+    
+    //まず最初に，出力ファイルをすべて読み込みます．
+    //注：すべて読み込まないで徐々に読み込む方式も開発する予定です．
     
     fp = fopen("dat.txt","rb");
     fseek(fp,0,SEEK_END);
@@ -93,6 +105,19 @@ int main(int argc,char** argv){
     printf("fsize:%d\n",(int)size);
     void *dat = malloc(size);
     fread(dat,1,size,fp);
+    
+    //読み込むと，バッファポインタが，一番最初に書き込まれたChunkの先頭を指している状態となります．
+    //(つまり，Headerの先頭でもある）
+    //定義されている便利関数を用いて，バッファポインタを，移動させることによって参照できるようにします．
+    //NameBuf(ChunkPointer)は，チャンクの先頭ポインタから，そのチャンクの名前を取得します．
+    //SizeBuf(ChunkPointer)は，チャンクの先頭ポインタから，そのチャンクのBufferのサイズ(size_t)を
+    //取得します．
+    //DescendBuf(chunkPointer)は，チャンクの先頭ポインタから，そのチャンクのBufferの先頭ポインタ
+    //を取得します．
+    //チャンクが親であった場合は，親が持つ一番初めの子のChunkの先頭のポインタになります．
+    //NextBufは，チャンクの先頭ポインタから，次のチャンクの先頭ポインタを取得します．
+    
+    
     printf("%s\n",NameBuf(dat));
     
     void *tmp = NextBuf(dat);
